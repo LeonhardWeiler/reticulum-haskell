@@ -23,6 +23,13 @@
               hp.cabal-install
 
               pkgs.git
+              pkgs.gcc
+              pkgs.gnumake
+              pkgs.coreutils
+              pkgs.diffutils
+              pkgs.findutils
+              pkgs.gawk
+              pkgs.gnused
             ];
 
             shellHook = ''
