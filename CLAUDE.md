@@ -285,7 +285,9 @@ number with a footnote is not.
     nix develop
     cabal build
 
-`flake.nix` pins the compiler and the package set. There is no second
+`flake.nix` names the compiler and `flake.lock` pins the package set;
+both are committed, and a toolchain that moves without a diff is not a
+pinned one. There is no second
 build path: what CI runs is the two commands above and `./check`, and a
 contributor runs the same three. No stack, no per-machine instructions,
 nothing that works only in the pipeline, and nothing that has to exist
