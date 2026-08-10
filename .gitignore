@@ -1,0 +1,10 @@
+dist-newstyle/
+cabal.project.local
+*.hi
+*.o
+
+result
+result-*
+
+.corpus/
+harness
