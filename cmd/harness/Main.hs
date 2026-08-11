@@ -12,6 +12,7 @@ import qualified Reticulum.Announce as Announce
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Packet as Packet
+import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
 main :: IO ()
@@ -41,6 +42,7 @@ dump kind blobs = case kind of
     "announce" -> Just (announce <$> blob 0 "packet")
     "plain" -> Just (plain <$> blob 0 "packet")
     "pathrequest" -> Just (pathrequest <$> blob 0 "packet")
+    "group" -> Just (group <$> blob 0 "group key" <*> blob 1 "packet")
     "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
     "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
@@ -150,6 +152,34 @@ pathrequest raw = packet raw $ \unpacked ->
         , ("unique_tag", maybe Absent Hex (Transport.uniqueTag request))
         , ("accepted", verdict (Transport.accepted request))
         ]
+
+group :: ByteString -> ByteString -> [Field]
+group key raw =
+    ("group_key", Hex key)
+        : packet raw (\unpacked -> fields <$> Token.token (Packet.payload unpacked))
+  where
+    halves = Token.keys key
+    fields value =
+        carried value
+            ++ [ ("signing_key", Hex (Token.signingKey halves))
+               , ("encryption_key", Hex (Token.encryptionKey halves))
+               ]
+            ++ opened halves value
+
+carried :: Token.Token -> [Field]
+carried value =
+    [ ("iv", Hex (Token.iv value))
+    , ("ciphertext", Hex (Token.ciphertext value))
+    , ("hmac", Hex (Token.hmac value))
+    ]
+
+opened :: Token.Keys -> Token.Token -> [Field]
+opened halves value =
+    ("hmac_valid", verdict (Token.hmacValid halves value)) : plaintext (Token.open halves value)
+
+plaintext :: Maybe ByteString -> [Field]
+plaintext Nothing = [("plaintext_length", Absent), ("plaintext", Absent)]
+plaintext (Just bytes) = [("plaintext_length", Dec (B.length bytes)), ("plaintext", Hex bytes)]
 
 packet :: ByteString -> (Packet.Packet -> Either Packet.Rejection [Field]) -> [Field]
 packet raw fields = case Packet.unpack raw of

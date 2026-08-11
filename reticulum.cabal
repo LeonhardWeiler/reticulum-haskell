@@ -19,6 +19,7 @@ library
                      Reticulum.Destination
                      Reticulum.Identity
                      Reticulum.Packet
+                     Reticulum.Token
                      Reticulum.Transport
     build-depends:   base        >=4.17 && <5
                    , bytestring
