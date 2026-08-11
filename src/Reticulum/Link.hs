@@ -3,6 +3,10 @@
 module Reticulum.Link
     ( Request (..)
     , request
+    , RequestProof (..)
+    , requestProof
+    , signedData
+    , signatureValid
     , mode
     , mtu
     , linkId
@@ -14,6 +18,7 @@ module Reticulum.Link
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
 
 import qualified Reticulum.Identity as Identity
@@ -38,7 +43,7 @@ modeBytemask = 0xe0
 data Request = Request
     { x25519Public :: ByteString
     , ed25519Public :: ByteString
-    , signalling :: Maybe ByteString
+    , requestSignalling :: Maybe ByteString
     }
 
 request :: ByteString -> Either Rejection Request
@@ -53,15 +58,53 @@ request payload
     half = publicKeysLength `div` 2
     keys = Request (B.take half payload) (B.take half (B.drop half payload))
 
+-- | The responder's Ed25519 key is in no packet, and only the half the
+-- initiator needs for the agreement is sent.
+data RequestProof = RequestProof
+    { signature :: ByteString
+    , responderPublic :: ByteString
+    , proofSignalling :: Maybe ByteString
+    }
+
+requestProof :: ByteString -> Either Rejection RequestProof
+requestProof payload
+    | length' == proofLength = Right (parts Nothing)
+    | length' == proofLength + signallingSize =
+        Right (parts (Just (B.drop proofLength payload)))
+    | otherwise = Left (SignalledLength length' proofLength (proofLength + signallingSize))
+  where
+    length' = B.length payload
+    parts =
+        RequestProof
+            (B.take Identity.signatureLength payload)
+            (B.take (publicKeysLength `div` 2) (B.drop Identity.signatureLength payload))
+
+proofLength :: Int
+proofLength = Identity.signatureLength + publicKeysLength `div` 2
+
+signedData :: ByteString -> ByteString -> RequestProof -> ByteString
+signedData link signer value =
+    B.concat
+        [ link
+        , responderPublic value
+        , signer
+        , fromMaybe B.empty (proofSignalling value)
+        ]
+
+signatureValid :: ByteString -> ByteString -> RequestProof -> Bool
+signatureValid link signer value =
+    Identity.verify signer (signedData link signer value) (signature value)
+
 -- | The decoder returns the three bits it read whatever they are, and
--- an unsignalled request reads as the one mode the reference enables.
-mode :: Request -> Word8
-mode value = case B.uncons =<< signalling value of
+-- a packet that signals nothing reads as the one mode the reference
+-- enables.
+mode :: Maybe ByteString -> Word8
+mode signalled = case B.uncons =<< signalled of
     Just (byte, _) -> (byte .&. modeBytemask) `shiftR` 5
     Nothing -> modeAes256Cbc
 
-mtu :: Request -> Maybe Int
-mtu value = (.&. mtuBytemask) . bigEndian <$> signalling value
+mtu :: Maybe ByteString -> Maybe Int
+mtu = fmap ((.&. mtuBytemask) . bigEndian)
 
 bigEndian :: ByteString -> Int
 bigEndian = B.foldl' (\value byte -> (value `shiftL` 8) .|. fromIntegral byte) 0

@@ -50,6 +50,7 @@ dump kind blobs = case kind of
         Just (encrypted <$> blob 0 "recipient private key" <*> pure (blobs `at` 1) <*> blob 2 "packet")
     "proof" -> Just (proof <$> blob 0 "proved packet" <*> blob 1 "public key" <*> blob 2 "packet")
     "linkrequest" -> Just (linkrequest <$> blob 0 "packet")
+    "linkproof" -> Just (linkproof <$> blob 0 "link request" <*> blob 1 "public key" <*> blob 2 "packet")
     "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
     "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
@@ -218,22 +219,45 @@ linkrequest raw = packet raw $ \unpacked ->
     fields unpacked <$> Link.request (Packet.payload unpacked)
   where
     fields unpacked value =
-        [ ("x25519_public", Hex (Link.x25519Public value))
-        , ("ed25519_public", Hex (Link.ed25519Public value))
-        , ("signalling", maybe Absent Hex (Link.signalling value))
-        , ("mode", mode value)
-        , ("mtu", maybe Absent Dec (Link.mtu value))
-        , ("link_id", Hex (Link.linkId unpacked))
+        ("x25519_public", Hex (Link.x25519Public value))
+            : ("ed25519_public", Hex (Link.ed25519Public value))
+            : signalled (Link.requestSignalling value)
+            ++ [("link_id", Hex (Link.linkId unpacked))]
+
+linkproof :: ByteString -> ByteString -> ByteString -> [Field]
+linkproof requestRaw signerKey raw =
+    [ ("link_request", Hex requestRaw)
+    , ("signer_public", Hex signerKey)
+    ]
+        ++ packet raw (\unpacked -> fields unpacked <$> Link.requestProof (Packet.payload unpacked))
+  where
+    link = Link.linkId <$> Packet.unpack requestRaw
+    signerEd = either (const signerKey) Identity.ed25519Public (Identity.publicKey signerKey)
+
+    fields unpacked value =
+        [ ("link_id", either (const Absent) Hex link)
+        , ("link_id_match", either (const Absent) (verdict . (Packet.address unpacked ==)) link)
+        , ("signature", Hex (Link.signature value))
+        , ("x25519_public", Hex (Link.responderPublic value))
         ]
+            ++ signalled (Link.proofSignalling value)
+            ++ [ ("signer_ed25519", Hex signerEd)
+               , ("signed_data", either (const Absent) (\l -> Hex (Link.signedData l signerEd value)) link)
+               , ( "signature_valid"
+                 , either (const Absent) (\l -> verdict (Link.signatureValid l signerEd value)) link
+                 )
+               ]
 
 -- | The format spells a mode as a keyword only where a vector carries
 -- the bits, so the one the reference defines and never sends is a byte.
-mode :: Link.Request -> Value
-mode value
-    | signalled == Link.modeAes256Cbc = Keyword "aes256_cbc"
-    | otherwise = byte signalled
+signalled :: Maybe ByteString -> [Field]
+signalled bytes =
+    [ ("signalling", maybe Absent Hex bytes)
+    , ("mode", if named == Link.modeAes256Cbc then Keyword "aes256_cbc" else byte named)
+    , ("mtu", maybe Absent Dec (Link.mtu bytes))
+    ]
   where
-    signalled = Link.mode value
+    named = Link.mode bytes
 
 proof :: ByteString -> ByteString -> ByteString -> [Field]
 proof provedRaw signerKey raw =
@@ -367,11 +391,11 @@ rejection broken = case broken of
         , ("payload_length", Dec present)
         , ("minimum_length", Dec needed)
         ]
-    Packet.SignalledLength present accepted signalled ->
+    Packet.SignalledLength present accepted withSignalling ->
         [ ("invalid", Keyword "invalid-length")
         , ("payload_length", Dec present)
         , ("accepted_length", Dec accepted)
-        , ("signalled_length", Dec signalled)
+        , ("signalled_length", Dec withSignalling)
         ]
     Packet.ProofLength present implicit explicit ->
         [ ("invalid", Keyword "invalid-length")
