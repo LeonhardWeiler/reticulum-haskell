@@ -17,7 +17,11 @@ module Reticulum.Identity
     , identityHash
     , fullHash
     , truncatedHash
+    , sign
+    , validate
     , keySize
+    , signatureLength
+    , ratchetSize
     , truncatedHashLength
     , nameHashLength
     ) where
@@ -33,6 +37,14 @@ import qualified Data.ByteString as B
 -- | RNS/Identity.py#KEYSIZE, in bytes.
 keySize :: Int
 keySize = 512 `div` 8
+
+-- | RNS/Identity.py#SIGLENGTH, in bytes.
+signatureLength :: Int
+signatureLength = 512 `div` 8
+
+-- | RNS/Identity.py#RATCHETSIZE, in bytes.
+ratchetSize :: Int
+ratchetSize = 256 `div` 8
 
 -- | RNS/Reticulum.py#TRUNCATED_HASHLENGTH, in bytes.
 truncatedHashLength :: Int
@@ -111,3 +123,46 @@ toPublic key = do
 
 identityHash :: PublicKey -> IdentityHash
 identityHash = IdentityHash . truncatedHash . publicKeyBytes
+
+-- | RNS/Identity.py#sign. Ed25519 signing is deterministic, RFC 8032
+-- section 5.1.6: the nonce comes from the key and the message and not
+-- from a random source, so the answer is a single value. The Ed25519
+-- half signs; the X25519 half is not a signing key.
+sign :: PrivateKey -> ByteString -> Either String ByteString
+sign key message = case Ed25519.secretKey (ed25519Private key) of
+    CryptoFailed reason -> Left ("ed25519 private key: " ++ show reason)
+    CryptoPassed secret ->
+        Right (ByteArray.convert (Ed25519.sign secret (Ed25519.toPublic secret) message))
+
+-- | RNS/Identity.py#validate. Ed25519 over the message as it stands:
+-- no prefix, no domain separator, no prior hashing.
+validate :: PublicKey -> ByteString -> ByteString -> Bool
+validate key message signature =
+    case (Ed25519.publicKey (ed25519Public key), Ed25519.signature signature) of
+        (CryptoPassed verifier, CryptoPassed signed)
+            | canonicalS signature -> Ed25519.verify verifier message signed
+        _ -> False
+
+-- | RFC 8032 section 5.1.7 admits only S < L, and S + L is a second
+-- encoding of the same signature. python-rns picks its curve at import
+-- time and the two disagree here: the openssl backend in the pin
+-- rejects S + L, the internal fallback accepts it. A signer never
+-- produces one, so this is a receiving-side rule, and a verifier that
+-- reduces S instead of checking it interoperates in one direction.
+--
+-- RNS/Cryptography/Provider.py#PROVIDER_PYCA
+canonicalS :: ByteString -> Bool
+canonicalS signature =
+    B.length s == B.length groupOrder && B.reverse s < groupOrder
+  where
+    s = B.drop (signatureLength `div` 2) signature
+
+-- | L, big endian. RFC 8032 section 5.1: 2^252 + 27742317777372353535851937790883648493.
+groupOrder :: ByteString
+groupOrder =
+    B.pack
+        [ 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        , 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        , 0x14, 0xde, 0xf9, 0xde, 0xa2, 0xf7, 0x9c, 0xd6
+        , 0x58, 0x12, 0x63, 0x1a, 0x5c, 0xf5, 0xd3, 0xed
+        ]

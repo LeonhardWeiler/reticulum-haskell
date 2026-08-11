@@ -10,6 +10,7 @@ import Data.Word (Word8)
 import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (ExitFailure), die, exitWith)
 
+import qualified Reticulum.Announce as Announce
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Packet as Packet
@@ -39,8 +40,11 @@ dump kind blobs = case kind of
     "identity" -> Just (identity <$> blob 0 "public key")
     "keyset" -> Just (keyset <$> blob 0 "private key")
     "destination" -> Just (destination <$> blob 0 "name" <*> pure (blobs `at` 1))
+    "announce" -> Just (announce <$> blob 0 "packet")
     "plain" -> Just (plain <$> blob 0 "packet")
     "pathrequest" -> Just (pathrequest <$> blob 0 "packet")
+    "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
+    "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
   where
     blob index what = maybe (Left ("raw carries no " ++ what)) Right (blobs `at` index)
@@ -88,6 +92,59 @@ destination rawName rawIdentity =
     hash = Destination.nameHash name
     holder = Identity.IdentityHash <$> rawIdentity
     address = Destination.destinationHash hash holder
+
+-- | corpus doc/identity, vector format: signature. The message is
+-- recorded by length and digest, which is what makes this kind and the
+-- one below the only two the corpus cannot rebuild raw from.
+signature :: ByteString -> ByteString -> ByteString -> [Field]
+signature rawKey message rawSignature =
+    gated key [("ed25519_public", Hex . Identity.ed25519Public)]
+        ++ recorded message
+        ++ [ ("signature", Hex rawSignature)
+           , ("valid", either (const Absent) verdict verified)
+           ]
+  where
+    key = Identity.publicKey rawKey
+    verified = (\k -> Identity.validate k message rawSignature) <$> key
+
+-- | corpus doc/identity, vector format: sign. The signature is the
+-- answer here rather than an input, and there is no verdict field.
+signed :: ByteString -> ByteString -> [Field]
+signed rawKey message =
+    gated key
+        [ ("private_key", Hex . Identity.privateKeyBytes)
+        , ("ed25519_private", Hex . Identity.ed25519Private)
+        ]
+        ++ gated (Identity.toPublic =<< key) [("ed25519_public", Hex . Identity.ed25519Public)]
+        ++ recorded message
+        ++ [("signature", either (const Absent) Hex (flip Identity.sign message =<< key))]
+  where
+    key = Identity.privateKey rawKey
+
+recorded :: ByteString -> [Field]
+recorded message =
+    [ ("message_length", Dec (B.length message))
+    , ("message_sha256", Hex (Identity.fullHash message))
+    ]
+
+-- | corpus doc/announce.
+announce :: ByteString -> [Field]
+announce raw = packet raw $ \unpacked ->
+    fields (Packet.address unpacked) <$> Announce.announce unpacked
+  where
+    fields address value =
+        [ ("public_key", Hex (Identity.publicKeyBytes (Announce.publicKey value)))
+        , ("name_hash", Hex (Destination.nameHashBytes (Announce.nameHash value)))
+        , ("random_hash", Hex (Announce.randomHash value))
+        , ("ratchet", maybe Absent Hex (Announce.ratchet value))
+        , ("signature", Hex (Announce.signature value))
+        , ("app_data", Hex (Announce.appData value))
+        , ("identity_hash", Hex (Identity.identityHashBytes (Identity.identityHash (Announce.publicKey value))))
+        , ("expected_hash", Hex (Destination.destinationHashBytes (Announce.expectedHash value)))
+        , ("destination_match", verdict (Announce.destinationMatch address value))
+        , ("signed_data", Hex (Announce.signedData address value))
+        , ("signature_valid", verdict (Announce.signatureValid address value))
+        ]
 
 -- | corpus doc/packet, section Plain destinations. The payload is the
 -- data: encryption to a plain destination returns the plaintext

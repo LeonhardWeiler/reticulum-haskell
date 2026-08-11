@@ -15,7 +15,8 @@ common strict
 library
     import:          strict
     hs-source-dirs:  src
-    exposed-modules: Reticulum.Destination
+    exposed-modules: Reticulum.Announce
+                     Reticulum.Destination
                      Reticulum.Identity
                      Reticulum.Packet
                      Reticulum.Transport
