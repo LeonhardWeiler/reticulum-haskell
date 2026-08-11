@@ -17,6 +17,7 @@ library
     hs-source-dirs:  src
     exposed-modules: Reticulum.Announce
                      Reticulum.Destination
+                     Reticulum.Encryption
                      Reticulum.Identity
                      Reticulum.Packet
                      Reticulum.Token

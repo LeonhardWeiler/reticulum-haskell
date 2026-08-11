@@ -10,11 +10,11 @@ below is the whole claim.
 
 Where it stands
 
-    51 passed, 0 failed, corpus 72746484, 53 skipped
+    58 passed, 0 failed, corpus 72746484, 46 skipped
 
 identity, keyset, destination, announce, plain, pathrequest, signature,
-sign, group. The kinds not implemented are skipped and named on that
-line; see the corpus's doc/harness, rule 3.
+sign, group, encrypted. The kinds not implemented are skipped and named
+on that line; see the corpus's doc/harness, rule 3.
 
 
 Build

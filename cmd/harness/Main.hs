@@ -10,6 +10,7 @@ import System.Exit (ExitCode (ExitFailure), die, exitWith)
 
 import qualified Reticulum.Announce as Announce
 import qualified Reticulum.Destination as Destination
+import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Token as Token
@@ -43,6 +44,8 @@ dump kind blobs = case kind of
     "plain" -> Just (plain <$> blob 0 "packet")
     "pathrequest" -> Just (pathrequest <$> blob 0 "packet")
     "group" -> Just (group <$> blob 0 "group key" <*> blob 1 "packet")
+    "encrypted" ->
+        Just (encrypted <$> blob 0 "recipient private key" <*> pure (blobs `at` 1) <*> blob 2 "packet")
     "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
     "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
@@ -165,6 +168,46 @@ group key raw =
                , ("encryption_key", Hex (Token.encryptionKey halves))
                ]
             ++ opened halves value
+
+encrypted :: ByteString -> Maybe ByteString -> ByteString -> [Field]
+encrypted rawKey rawRatchet raw =
+    [ ("recipient_private", Hex rawKey)
+    , ("ratchet_private", maybe Absent Hex rawRatchet)
+    ]
+        ++ packet raw (\unpacked -> fields <$> Encryption.encrypted (Packet.payload unpacked))
+  where
+    recipient = Identity.privateKey rawKey
+    salt = Identity.identityHashBytes . Identity.identityHash <$> (Identity.toPublic =<< recipient)
+    scalar = maybe (Identity.x25519Private <$> recipient) Right rawRatchet
+
+    fields value =
+        ("ephemeral_public", Hex (Encryption.ephemeralPublic value))
+            : carried (Encryption.token value)
+            ++ [ ("identity_hash", either (const Absent) Hex salt)
+               , ("ratchet_public", maybe Absent (maybe Absent Hex . Encryption.publicPoint) rawRatchet)
+               ]
+            ++ agreement (Encryption.token value) (secret (Encryption.ephemeralPublic value))
+
+    secret ephemeral = do
+        own <- either (const Nothing) Just scalar
+        recipientHash <- either (const Nothing) Just salt
+        agreed <- Encryption.shared own ephemeral
+        Just (agreed, Token.keys (Encryption.derive Encryption.derivedKeyLength agreed recipientHash))
+
+agreement :: Token.Token -> Maybe (ByteString, Token.Keys) -> [Field]
+agreement _ Nothing =
+    [ ("shared_key", Absent)
+    , ("signing_key", Absent)
+    , ("encryption_key", Absent)
+    , ("hmac_valid", Absent)
+    ]
+        ++ plaintext Nothing
+agreement value (Just (agreed, halves)) =
+    [ ("shared_key", Hex agreed)
+    , ("signing_key", Hex (Token.signingKey halves))
+    , ("encryption_key", Hex (Token.encryptionKey halves))
+    ]
+        ++ opened halves value
 
 carried :: Token.Token -> [Field]
 carried value =
