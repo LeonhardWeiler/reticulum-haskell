@@ -10,12 +10,10 @@ below is the whole claim.
 
 Where it stands
 
-    73 passed, 0 failed, corpus 72746484, 31 skipped
+    100 passed, 0 failed, corpus 72746484, 4 skipped: ifac
 
-identity, keyset, destination, announce, plain, pathrequest, signature,
-sign, group, encrypted, proof, linkrequest, linkproof. The kinds not
-implemented are skipped and named on that line; see the corpus's
-doc/harness, rule 3.
+Every kind but ifac. A kind not implemented is skipped and named on that
+line; see the corpus's doc/harness, rule 3.
 
 
 Build

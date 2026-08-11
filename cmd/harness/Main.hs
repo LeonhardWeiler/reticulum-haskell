@@ -4,17 +4,21 @@ import qualified Data.ByteArray.Encoding as Encoding
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
-import Data.Word (Word8)
+import Data.Bits (shiftR)
+import Data.Word (Word16, Word64, Word8)
 import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (ExitFailure), die, exitWith)
 
 import qualified Reticulum.Announce as Announce
+import qualified Reticulum.Channel as Channel
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Link as Link
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Proof as Proof
+import qualified Reticulum.Request as Request
+import qualified Reticulum.Resource as Resource
 import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
@@ -51,6 +55,9 @@ dump kind blobs = case kind of
     "proof" -> Just (proof <$> blob 0 "proved packet" <*> blob 1 "public key" <*> blob 2 "packet")
     "linkrequest" -> Just (linkrequest <$> blob 0 "packet")
     "linkproof" -> Just (linkproof <$> blob 0 "link request" <*> blob 1 "public key" <*> blob 2 "packet")
+    "linkdata" ->
+        Just (linkdata <$> blob 0 "link request" <*> blob 1 "responder private key" <*> blob 2 "packet")
+    "resourceproof" -> Just (resourceproof <$> blob 0 "resource hash" <*> blob 1 "packet")
     "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
     "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
@@ -248,6 +255,131 @@ linkproof requestRaw signerKey raw =
                  )
                ]
 
+linkdata :: ByteString -> ByteString -> ByteString -> [Field]
+linkdata requestRaw responderKey raw =
+    [ ("link_request", Hex requestRaw)
+    , ("responder_private", Hex responderKey)
+    ]
+        ++ carriedOn raw fields
+  where
+    opening = do
+        unpacked <- either (const Nothing) Just (Packet.unpack requestRaw)
+        value <- either (const Nothing) Just (Link.request (Packet.payload unpacked))
+        Just (Link.linkId unpacked, Link.x25519Public value)
+    secret = (\(link, peer) -> Link.handshake responderKey peer link) =<< opening
+
+    fields unpacked =
+        [ ("link_id", maybe Absent (Hex . fst) opening)
+        , ("link_id_match", maybe Absent (verdict . (Packet.address unpacked ==) . fst) opening)
+        , ("encrypted", verdict (Packet.encrypted unpacked))
+        ]
+            ++ body unpacked
+
+    body unpacked
+        | Packet.encrypted unpacked =
+            either rejection (token unpacked) (Token.token (Packet.payload unpacked))
+        | otherwise = plaintext (Just (Packet.payload unpacked)) ++ contents unpacked (Packet.payload unpacked)
+
+    token unpacked value =
+        carried value
+            ++ agreement value ((\held -> (Link.shared held, Link.keys held)) <$> secret)
+            ++ maybe [] (contents unpacked) (flip Token.open value . Link.keys =<< secret)
+
+    contents unpacked = either rejection id . decompose (fst <$> opening) (Packet.context unpacked)
+
+decompose :: Maybe ByteString -> Packet.Context -> ByteString -> Either Packet.Rejection [Field]
+decompose link named bytes = case named of
+    Packet.LinkIdentify -> Right (identify link bytes)
+    Packet.Channel -> channel <$> Channel.envelope bytes
+    Packet.Request -> asked <$> Request.request bytes
+    Packet.Response -> answered <$> Request.response bytes
+    Packet.ResourceAdv -> advertisement <$> Resource.advertisement bytes
+    Packet.ResourceReq -> partRequest <$> Resource.partRequest bytes
+    Packet.ResourceHmu -> update <$> Resource.update bytes
+    Packet.ResourceIcl -> Right [("resource_hash", Hex (Resource.cancel bytes))]
+    Packet.ResourceRcl -> Right [("resource_hash", Hex (Resource.cancel bytes))]
+    _ -> Right []
+
+asked :: Request.Request -> [Field]
+asked value =
+    [ ("request_time", maybe Absent Hex (Request.time value))
+    , ("request_path_hash", maybe Absent Hex (Request.pathHash value))
+    , ("request_data", maybe Absent Hex (Request.requestBody value))
+    ]
+
+answered :: Request.Response -> [Field]
+answered value =
+    [ ("request_id", maybe Absent Hex (Request.requestId value))
+    , ("response_data", maybe Absent Hex (Request.responseBody value))
+    ]
+
+advertisement :: Resource.Advertisement -> [Field]
+advertisement value =
+    [ ("transfer_size", counted (Resource.transferSize value))
+    , ("data_size", counted (Resource.dataSize value))
+    , ("resource_parts", counted (Resource.parts value))
+    , ("resource_hash", maybe Absent Hex (Resource.resourceHash value))
+    , ("resource_random", maybe Absent Hex (Resource.randomHash value))
+    , ("original_hash", maybe Absent Hex (Resource.originalHash value))
+    , ("segment_index", counted (Resource.segmentIndex value))
+    , ("total_segments", counted (Resource.totalSegments value))
+    , ("request_id", maybe Absent Hex (Resource.requestId value))
+    , ("resource_flags", maybe Absent byte (Resource.flags value))
+    , ("hashmap", maybe Absent Hex (Resource.hashmap value))
+    ]
+
+partRequest :: Resource.PartRequest -> [Field]
+partRequest value =
+    [ ("hashmap_exhausted", verdict (Resource.exhausted value))
+    , ("last_map_hash", maybe Absent Hex (Resource.lastMapHash value))
+    , ("resource_hash", Hex (Resource.requestedResource value))
+    , ("requested_hashes", Hex (Resource.requestedHashes value))
+    ]
+
+update :: Resource.Update -> [Field]
+update value =
+    [ ("resource_hash", Hex (Resource.updatedResource value))
+    , ("segment_index", counted (Resource.updateSegment value))
+    , ("hashmap", maybe Absent Hex (Resource.updateHashmap value))
+    ]
+
+resourceproof :: ByteString -> ByteString -> [Field]
+resourceproof advertised raw =
+    ("advertised_hash", Hex advertised)
+        : carriedOn raw (either rejection fields . Resource.proof . Packet.payload)
+  where
+    fields value =
+        [ ("resource_hash", Hex (Resource.provedResource value))
+        , ("resource_proof", Hex (Resource.dataHash value))
+        , ("hash_match", verdict (Resource.provedResource value == advertised))
+        ]
+
+counted :: Maybe Word64 -> Value
+counted = maybe Absent (Dec . fromIntegral)
+
+identify :: Maybe ByteString -> ByteString -> [Field]
+identify link bytes = case Link.identify bytes of
+    Nothing ->
+        [ ("identity_public", Absent)
+        , ("identity_hash", Absent)
+        , ("identity_signed", Absent)
+        , ("identity_valid", Absent)
+        ]
+    Just value ->
+        [ ("identity_public", Hex (Identity.publicKeyBytes (Link.identityPublic value)))
+        , ("identity_hash", Hex (Identity.identityHashBytes (Identity.identityHash (Link.identityPublic value))))
+        , ("identity_signed", maybe Absent (\l -> Hex (Link.identifySigned l value)) link)
+        , ("identity_valid", maybe Absent (\l -> verdict (Link.identifyValid l value)) link)
+        ]
+
+channel :: Channel.Envelope -> [Field]
+channel value =
+    [ ("msgtype", word16 (Channel.messageType value))
+    , ("sequence", Dec (fromIntegral (Channel.sequence value)))
+    , ("declared_length", Dec (fromIntegral (Channel.declaredLength value)))
+    , ("message", Hex (Channel.message value))
+    ]
+
 -- | The format spells a mode as a keyword only where a vector carries
 -- the bits, so the one the reference defines and never sends is a byte.
 signalled :: Maybe ByteString -> [Field]
@@ -318,6 +450,13 @@ packet raw fields = case Packet.unpack raw of
     Right unpacked -> case fields unpacked of
         Left reason -> rejection reason
         Right rest -> header unpacked ++ rest
+
+-- | A payload rejection on a link stands behind the fields that were
+-- read before it rather than deleting them.
+carriedOn :: ByteString -> (Packet.Packet -> [Field]) -> [Field]
+carriedOn raw fields = case Packet.unpack raw of
+    Left reason -> rejection reason
+    Right unpacked -> header unpacked ++ fields unpacked
 
 header :: Packet.Packet -> [Field]
 header unpacked =
@@ -397,6 +536,15 @@ rejection broken = case broken of
         , ("accepted_length", Dec accepted)
         , ("signalled_length", Dec withSignalling)
         ]
+    Packet.ShortPlaintext needed ->
+        [ ("invalid", Keyword "short-plaintext")
+        , ("minimum_length", Dec needed)
+        ]
+    Packet.FixedLength present accepted ->
+        [ ("invalid", Keyword "invalid-length")
+        , ("payload_length", Dec present)
+        , ("accepted_length", Dec accepted)
+        ]
     Packet.ProofLength present implicit explicit ->
         [ ("invalid", Keyword "invalid-length")
         , ("payload_length", Dec present)
@@ -432,6 +580,9 @@ render (name, value) = name ++ replicate (nameColumns - length name) ' ' ++ " " 
 
 byte :: Word8 -> Value
 byte = Hex . B.singleton
+
+word16 :: Word16 -> Value
+word16 value = Hex (B.pack [fromIntegral (value `shiftR` 8), fromIntegral value])
 
 verdict :: Bool -> Value
 verdict held = Keyword (if held then "yes" else "no")

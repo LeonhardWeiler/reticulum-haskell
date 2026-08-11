@@ -12,6 +12,7 @@ module Reticulum.Packet
     , toContext
     , contextByte
     , Rejection (..)
+    , encrypted
     , hashablePart
     , packetHash
     , addressLength
@@ -135,6 +136,10 @@ data Rejection
       ProofLength Int Int Int
     | -- | bytes present, the length without signalling, and with it
       SignalledLength Int Int Int
+    | -- | bytes needed
+      ShortPlaintext Int
+    | -- | bytes present, the one accepted length
+      FixedLength Int Int
     deriving (Eq)
 
 -- | The address is a destination hash for every packet but two: a link
@@ -189,6 +194,18 @@ unpack raw = case B.unpack (B.take 2 raw) of
             Header1 -> 2
             Header2 -> 2 + addressLength
     _ -> Left (ShortHeader (B.length raw) 2)
+
+-- | A resource takes care of its own encryption, a keepalive carries no
+-- data, and the three other kinds of packet are read before a key is
+-- known.
+encrypted :: Packet -> Bool
+encrypted unpacked = case packetType unpacked of
+    Announce -> False
+    LinkRequest -> False
+    Proof -> False
+    Data -> case destinationType unpacked of
+        Plain -> False
+        _ -> context unpacked `notElem` [Resource, Keepalive, CacheRequest]
 
 -- | Neither the hop count nor the transport id is in it, so the hash
 -- survives a hop and a transport node rewriting the header.

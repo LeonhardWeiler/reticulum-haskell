@@ -7,6 +7,12 @@ module Reticulum.Link
     , requestProof
     , signedData
     , signatureValid
+    , Handshake (..)
+    , handshake
+    , Identify (..)
+    , identify
+    , identifySigned
+    , identifyValid
     , mode
     , mtu
     , linkId
@@ -21,9 +27,11 @@ import qualified Data.ByteString as B
 import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
 
+import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import Reticulum.Packet (Rejection (SignalledLength))
 import qualified Reticulum.Packet as Packet
+import qualified Reticulum.Token as Token
 
 publicKeysLength :: Int
 publicKeysLength = 64
@@ -48,15 +56,15 @@ data Request = Request
 
 request :: ByteString -> Either Rejection Request
 request payload
-    | length' == publicKeysLength = Right (keys Nothing)
+    | length' == publicKeysLength = Right (drawn Nothing)
     | length' == publicKeysLength + signallingSize =
-        Right (keys (Just (B.drop publicKeysLength payload)))
+        Right (drawn (Just (B.drop publicKeysLength payload)))
     | otherwise =
         Left (SignalledLength length' publicKeysLength (publicKeysLength + signallingSize))
   where
     length' = B.length payload
     half = publicKeysLength `div` 2
-    keys = Request (B.take half payload) (B.take half (B.drop half payload))
+    drawn = Request (B.take half payload) (B.take half (B.drop half payload))
 
 -- | The responder's Ed25519 key is in no packet, and only the half the
 -- initiator needs for the agreement is sent.
@@ -94,6 +102,39 @@ signedData link signer value =
 signatureValid :: ByteString -> ByteString -> RequestProof -> Bool
 signatureValid link signer value =
     Identity.verify signer (signedData link signer value) (signature value)
+
+data Handshake = Handshake
+    { shared :: ByteString
+    , keys :: Token.Keys
+    }
+
+-- | The salt is the link id, which no packet on the link carries.
+handshake :: ByteString -> ByteString -> ByteString -> Maybe Handshake
+handshake own peer link = derived <$> Encryption.shared own peer
+  where
+    derived agreed =
+        Handshake agreed (Token.keys (Encryption.derive Encryption.derivedKeyLength agreed link))
+
+data Identify = Identify
+    { identityPublic :: Identity.PublicKey
+    , identitySignature :: ByteString
+    }
+
+identify :: ByteString -> Maybe Identify
+identify plain
+    | B.length plain == Identity.keySize + Identity.signatureLength =
+        flip Identify (B.drop Identity.keySize plain)
+            <$> either (const Nothing) Just (Identity.publicKey (B.take Identity.keySize plain))
+    | otherwise = Nothing
+
+-- | The link id is signed, so an identify cannot be lifted onto another
+-- link.
+identifySigned :: ByteString -> Identify -> ByteString
+identifySigned link value = link <> Identity.publicKeyBytes (identityPublic value)
+
+identifyValid :: ByteString -> Identify -> Bool
+identifyValid link value =
+    Identity.validate (identityPublic value) (identifySigned link value) (identitySignature value)
 
 -- | The decoder returns the three bits it read whatever they are, and
 -- a packet that signals nothing reads as the one mode the reference

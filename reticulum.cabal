@@ -16,12 +16,16 @@ library
     import:          strict
     hs-source-dirs:  src
     exposed-modules: Reticulum.Announce
+                     Reticulum.Channel
                      Reticulum.Destination
                      Reticulum.Encryption
                      Reticulum.Identity
                      Reticulum.Link
+                     Reticulum.Msgpack
                      Reticulum.Packet
                      Reticulum.Proof
+                     Reticulum.Request
+                     Reticulum.Resource
                      Reticulum.Token
                      Reticulum.Transport
     build-depends:   base        >=4.17 && <5
