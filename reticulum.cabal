@@ -19,6 +19,7 @@ library
                      Reticulum.Destination
                      Reticulum.Encryption
                      Reticulum.Identity
+                     Reticulum.Link
                      Reticulum.Packet
                      Reticulum.Proof
                      Reticulum.Token

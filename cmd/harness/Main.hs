@@ -12,6 +12,7 @@ import qualified Reticulum.Announce as Announce
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
+import qualified Reticulum.Link as Link
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Proof as Proof
 import qualified Reticulum.Token as Token
@@ -48,6 +49,7 @@ dump kind blobs = case kind of
     "encrypted" ->
         Just (encrypted <$> blob 0 "recipient private key" <*> pure (blobs `at` 1) <*> blob 2 "packet")
     "proof" -> Just (proof <$> blob 0 "proved packet" <*> blob 1 "public key" <*> blob 2 "packet")
+    "linkrequest" -> Just (linkrequest <$> blob 0 "packet")
     "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
     "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
@@ -211,6 +213,28 @@ agreement value (Just (agreed, halves)) =
     ]
         ++ opened halves value
 
+linkrequest :: ByteString -> [Field]
+linkrequest raw = packet raw $ \unpacked ->
+    fields unpacked <$> Link.request (Packet.payload unpacked)
+  where
+    fields unpacked value =
+        [ ("x25519_public", Hex (Link.x25519Public value))
+        , ("ed25519_public", Hex (Link.ed25519Public value))
+        , ("signalling", maybe Absent Hex (Link.signalling value))
+        , ("mode", mode value)
+        , ("mtu", maybe Absent Dec (Link.mtu value))
+        , ("link_id", Hex (Link.linkId unpacked))
+        ]
+
+-- | The format spells a mode as a keyword only where a vector carries
+-- the bits, so the one the reference defines and never sends is a byte.
+mode :: Link.Request -> Value
+mode value
+    | signalled == Link.modeAes256Cbc = Keyword "aes256_cbc"
+    | otherwise = byte signalled
+  where
+    signalled = Link.mode value
+
 proof :: ByteString -> ByteString -> ByteString -> [Field]
 proof provedRaw signerKey raw =
     [ ("proved_packet", Hex provedRaw)
@@ -342,6 +366,12 @@ rejection broken = case broken of
         [ ("invalid", Keyword "short-payload")
         , ("payload_length", Dec present)
         , ("minimum_length", Dec needed)
+        ]
+    Packet.SignalledLength present accepted signalled ->
+        [ ("invalid", Keyword "invalid-length")
+        , ("payload_length", Dec present)
+        , ("accepted_length", Dec accepted)
+        , ("signalled_length", Dec signalled)
         ]
     Packet.ProofLength present implicit explicit ->
         [ ("invalid", Keyword "invalid-length")
