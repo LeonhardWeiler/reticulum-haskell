@@ -18,6 +18,7 @@ module Reticulum.Identity
     , truncatedHash
     , sign
     , validate
+    , verify
     , keySize
     , signatureLength
     , ratchetSize
@@ -117,8 +118,11 @@ sign key message = case Ed25519.secretKey (ed25519Private key) of
         Right (ByteArray.convert (Ed25519.sign secret (Ed25519.toPublic secret) message))
 
 validate :: PublicKey -> ByteString -> ByteString -> Bool
-validate key message signature =
-    case (Ed25519.publicKey (ed25519Public key), Ed25519.signature signature) of
+validate = verify . ed25519Public
+
+verify :: ByteString -> ByteString -> ByteString -> Bool
+verify key message signature =
+    case (Ed25519.publicKey key, Ed25519.signature signature) of
         (CryptoPassed verifier, CryptoPassed signed)
             | canonicalS signature -> Ed25519.verify verifier message signed
         _ -> False

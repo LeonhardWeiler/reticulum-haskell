@@ -13,6 +13,7 @@ import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Packet as Packet
+import qualified Reticulum.Proof as Proof
 import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
@@ -46,6 +47,7 @@ dump kind blobs = case kind of
     "group" -> Just (group <$> blob 0 "group key" <*> blob 1 "packet")
     "encrypted" ->
         Just (encrypted <$> blob 0 "recipient private key" <*> pure (blobs `at` 1) <*> blob 2 "packet")
+    "proof" -> Just (proof <$> blob 0 "proved packet" <*> blob 1 "public key" <*> blob 2 "packet")
     "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
     "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
@@ -209,6 +211,44 @@ agreement value (Just (agreed, halves)) =
     ]
         ++ opened halves value
 
+proof :: ByteString -> ByteString -> ByteString -> [Field]
+proof provedRaw signerKey raw =
+    [ ("proved_packet", Hex provedRaw)
+    , ("signer_public", Hex signerKey)
+    ]
+        ++ packet raw (\unpacked -> fields unpacked <$> Proof.proof (Packet.payload unpacked))
+  where
+    proved = Packet.unpack provedRaw
+    computed = Packet.packetHash <$> proved
+    signerEd = either (const signerKey) Identity.ed25519Public (Identity.publicKey signerKey)
+
+    fields unpacked value =
+        [ ("form", Keyword (case Proof.form value of Proof.Implicit -> "implicit"; Proof.Explicit -> "explicit"))
+        , ("packet_hash", either (const Absent) Hex computed)
+        , ("proof_hash", maybe Absent Hex (Proof.provedHash value))
+        , ("hash_match", either (const Absent) (\hash -> verdict (Proof.hashMatch hash value)) computed)
+        ]
+            ++ addressed unpacked
+            ++ [ ("signature", Hex (Proof.signature value))
+               , ("signer_ed25519", Hex signerEd)
+               , ( "signature_valid"
+                 , either (const Absent) (\hash -> verdict (Proof.signatureValid signerEd hash value)) computed
+                 )
+               ]
+
+    addressed unpacked = case Packet.destinationType unpacked of
+        Packet.Link ->
+            [ ("link_id", either (const Absent) (Hex . Packet.address) proved)
+            , ("link_id_match", either (const Absent) (verdict . sameAddress unpacked . Packet.address) proved)
+            ]
+        _ ->
+            [ ("proof_destination", either (const Absent) (Hex . Proof.proofDestination) computed)
+            , ( "destination_match"
+              , either (const Absent) (verdict . sameAddress unpacked . Proof.proofDestination) computed
+              )
+            ]
+    sameAddress unpacked = (Packet.address unpacked ==)
+
 carried :: Token.Token -> [Field]
 carried value =
     [ ("iv", Hex (Token.iv value))
@@ -302,6 +342,12 @@ rejection broken = case broken of
         [ ("invalid", Keyword "short-payload")
         , ("payload_length", Dec present)
         , ("minimum_length", Dec needed)
+        ]
+    Packet.ProofLength present implicit explicit ->
+        [ ("invalid", Keyword "invalid-length")
+        , ("payload_length", Dec present)
+        , ("implicit_length", Dec implicit)
+        , ("explicit_length", Dec explicit)
         ]
 
 data Value

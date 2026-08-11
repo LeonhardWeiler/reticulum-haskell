@@ -12,6 +12,8 @@ module Reticulum.Packet
     , toContext
     , contextByte
     , Rejection (..)
+    , hashablePart
+    , packetHash
     , addressLength
     , pathfinderM
     ) where
@@ -129,6 +131,8 @@ data Rejection
       HopLimit Int Int
     | -- | bytes present, bytes needed
       ShortPayload Int Int
+    | -- | bytes present, the implicit length, the explicit length
+      ProofLength Int Int Int
     deriving (Eq)
 
 -- | The address is a destination hash for every packet but two: a link
@@ -183,6 +187,20 @@ unpack raw = case B.unpack (B.take 2 raw) of
             Header1 -> 2
             Header2 -> 2 + addressLength
     _ -> Left (ShortHeader (B.length raw) 2)
+
+-- | Neither the hop count nor the transport id is in it, so the hash
+-- survives a hop and a transport node rewriting the header.
+hashablePart :: Packet -> ByteString
+hashablePart unpacked =
+    B.concat
+        [ B.singleton (flags unpacked .&. 0x0f)
+        , address unpacked
+        , B.singleton (contextByte (context unpacked))
+        , payload unpacked
+        ]
+
+packetHash :: Packet -> ByteString
+packetHash = Identity.fullHash . hashablePart
 
 destinationTypeOf :: Word8 -> DestinationType
 destinationTypeOf flagsByte = case (flagsByte `shiftR` 2) .&. 0x03 of

@@ -20,6 +20,7 @@ library
                      Reticulum.Encryption
                      Reticulum.Identity
                      Reticulum.Packet
+                     Reticulum.Proof
                      Reticulum.Token
                      Reticulum.Transport
     build-depends:   base        >=4.17 && <5
