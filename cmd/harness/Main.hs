@@ -652,34 +652,15 @@ encode kind fields = case kind of
     "announce" -> Just (rebuilt [] (announced fields))
     "pathrequest" -> Just (rebuilt [] (asking fields))
     "group" -> Just (rebuilt ["group_key"] (Token.pack <$> sealed fields))
-    "encrypted" ->
-        Just
-            ( rebuilt
-                ["recipient_private", "ratchet_private"]
-                (Encryption.pack <$> (Encryption.Encrypted <$> part fields "ephemeral_public" <*> sealed fields))
-            )
+    "encrypted" -> Just (rebuilt ["recipient_private", "ratchet_private"] (enveloped fields))
     "linkrequest" -> Just (rebuilt [] (requesting fields))
     "linkproof" -> Just (rebuilt ["link_request", "signer_public"] (proving fields))
     "linkdata" -> Just (rebuilt ["link_request", "responder_private"] (onLink fields))
-    "proof" ->
-        Just
-            ( rebuilt
-                ["proved_packet", "signer_public"]
-                (fmap Proof.pack (Proof.Proof <$> given fields "proof_hash" <*> part fields "signature"))
-            )
-    "resourceproof" ->
-        Just
-            ( rebuilt
-                ["advertised_hash"]
-                ( fmap Resource.packProof $
-                    Resource.Proof <$> part fields "resource_hash" <*> part fields "resource_proof"
-                )
-            )
+    "proof" -> Just (rebuilt ["proved_packet", "signer_public"] (proven fields))
+    "resourceproof" -> Just (rebuilt ["advertised_hash"] (delivered fields))
     "ifac" -> Just (masking fields)
-    -- Raw holds the message, and expect records only its length and its
-    -- hash.
-    "signature" -> Just (Left "the kind is not of the encode class")
-    "sign" -> Just (Left "the kind is not of the encode class")
+    "signature" -> Just (unrecorded)
+    "sign" -> Just (unrecorded)
     _ -> Nothing
   where
     echoed = mapM (written fields)
@@ -688,6 +669,24 @@ encode kind fields = case kind of
         first <- echoed echoes
         built <- packed fields =<< body
         pure (first ++ [hex built])
+
+unrecorded :: Either String [String]
+unrecorded = Left "raw holds the message, and expect records it by its length and its hash"
+
+enveloped :: Fields -> Either String ByteString
+enveloped fields =
+    fmap Encryption.pack $
+        Encryption.Encrypted <$> part fields "ephemeral_public" <*> sealed fields
+
+proven :: Fields -> Either String ByteString
+proven fields =
+    fmap Proof.pack $
+        Proof.Proof <$> given fields "proof_hash" <*> part fields "signature"
+
+delivered :: Fields -> Either String ByteString
+delivered fields =
+    fmap Resource.packProof $
+        Resource.Proof <$> part fields "resource_hash" <*> part fields "resource_proof"
 
 -- | The size raw carries is the length of the code, and the frame is
 -- the one line the encoders do not simply lay end to end.
