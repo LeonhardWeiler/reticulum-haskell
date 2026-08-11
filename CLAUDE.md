@@ -111,22 +111,23 @@ Threads:
 
 ---
 
-# Names and Citations
+# Names
 
-    Reticulum.Packet    RNS/Packet.py
+A module is named for what it holds, and the name is the whole
+explanation:
 
-The reference is cited by symbol, never by line number:
+    Reticulum.Packet    the header and the flags byte
 
-    RNS/Packet.py#get_hashable_part
-
-A corpus document by path: corpus `doc/announce`.
+The reference and the corpus are not cited in the code. Not by symbol,
+not by path, not in a module header. Where they are named is this file,
+the README and the commit message.
 
 ---
 
 # Configuration
 
-Constants the reference fixes are written where they are used, beside
-the symbol they came from. They are not settings.
+Constants the reference fixes are written where they are used. They are
+not settings.
 
 What a node has to be told is read once at startup and turned into
 values. No component reads configuration.
@@ -176,13 +177,21 @@ If the first answer is yes, stop.
 Short sentences. Concrete byte offsets. This file, a README and a
 comment are one discipline: say the thing, then stop.
 
-Comments are rare and the default is none. A comment carries what the
-code cannot: where a constant came from, an order that looks arbitrary
-and is not, a case got wrong once. Not why one choice was made over
-another. Not the name above it, restated. When in doubt, delete it.
+A comment is an exception. The default is none, and most files have
+none. One is written only where a reader who has the code in front of
+them still cannot arrive at the fact: a rule that is not visible in the
+bytes, an order that looks arbitrary and is not.
 
-Haddock is not exempt. A module names the reference symbol it follows.
-A function with a type and a name needs no sentence rewriting them.
+One sentence. Never two. A comment that needs a second sentence is a
+name that needs changing.
+
+Not a citation. Not why one choice was made over another. Not the name
+above it, restated. Not a header on every function, and not a header on
+every module. When in doubt, delete it: the code was there first and
+stands without it.
+
+Haddock is not exempt, and is not a reason to write a sentence. A
+function with a type and a name needs no prose.
 
 git log holds what the code did before. A commented-out line is
 nothing.
