@@ -48,6 +48,11 @@ checks =
     , ("a proof on the wrong interface goes nowhere", pure wrongWay)
     , ("a packet crosses a transport node and its proof returns", throughTheMiddle)
     , ("a link is opened across a transport node", linkThroughTheMiddle)
+    , ("an answer is held until what it holds is sent", pure heldBack)
+    , ("a transport node answers from the announce it kept", pathAnswered)
+    , ("a destination answers for itself", ownPathAnswered)
+    , ("a request with no tag is not answered", taglessIgnored)
+    , ("the same request twice is answered once", twiceAsked)
     , ("a link request crossing is written down", pure linkKept)
     , ("another packet writes no crossing", pure noCrossing)
     , ("a packet on a link goes to the other side", pure alongTheLink)
@@ -246,11 +251,11 @@ wrongWay = case Transport.returned 'a' (proofFor sent) kept of
 notQueued :: Either String ()
 notQueued =
     require "a path response was queued" $
-        case Transport.queued (Time 0) 0 () response of
+        case Transport.queued (Time 0) 0 () answering of
             Nothing -> True
             Just _ -> False
   where
-    response = (announced 1 Nothing) {Packet.context = Packet.PathResponse}
+    answering = (announced 1 Nothing) {Packet.context = Packet.PathResponse}
 
 emptiedTwice :: Either String ()
 emptiedTwice = case Transport.queued (Time 0) 0 () (announced 1 Nothing) of
@@ -506,3 +511,90 @@ linkThroughTheMiddle = do
                             require "the link carried nothing" (isJust spoken)
     Node.stop middle
     pure outcome
+
+heldBack :: Either String ()
+heldBack = case Transport.queued (Time 0) 0 'a' (announced 1 Nothing) of
+    Nothing -> Left "an announce was not queued"
+    Just entry -> do
+        let answering =
+                Transport.responding (Time 0) 'c' (onePath 'a' 2) (announced 2 Nothing) (Just entry)
+            table = Map.singleton (Destination.DestinationHash destination) answering
+            (first, afterFirst) = Transport.due (Time 1) table
+            (second, _) = Transport.due (Time 20) afterFirst
+        expect "the answer" 1 (length first)
+        require "the answer is not a path response" $
+            map (Packet.context . Transport.rebroadcast ours) first == [Packet.PathResponse]
+        expect "the announce that was held" 1 (length second)
+        require "what was held is a path response" $
+            map (Packet.context . Transport.rebroadcast ours) second == [Packet.None]
+
+asking :: ByteString -> Maybe ByteString -> Packet.Packet
+asking wanted tag =
+    (announced 0 Nothing)
+        { Packet.packetType = Packet.Data
+        , Packet.destinationType = Packet.Plain
+        , Packet.address = Transport.pathRequestAddress
+        , Packet.payload = Transport.pack (Transport.PathRequest wanted Nothing tag)
+        }
+
+response :: Packet.Packet -> Bool
+response packet =
+    Packet.packetType packet == Packet.Announce
+        && Packet.context packet == Packet.PathResponse
+
+counting :: IO [ByteString] -> (Packet.Packet -> Bool) -> IO Int
+counting reader wanted = length . filter wanted . rights . map Packet.unpack <$> reader
+
+pathAnswered :: IO (Either String ())
+pathAnswered = do
+    (middle, _, _) <- started True
+    (far, _, emitter) <- started False
+    wire "two" middle far
+    Node.announce far (Destination.name carried) B.empty
+    learned <- waitFor (reached middle emitter)
+    outcome <- case learned of
+        Nothing -> pure (Left "the node between did not learn the path")
+        Just _ -> do
+            (near, _, _) <- started False
+            (_, backToNear) <- tap "one" near middle
+            Node.requestPath near (Destination.DestinationHash (addressOf emitter))
+            answered <- awaited backToNear response
+            found <- reached near emitter
+            pure $ do
+                require "no path response came back" (isJust answered)
+                require "the answer was not learned" (isJust found)
+    Node.stop middle
+    pure outcome
+
+ownPathAnswered :: IO (Either String ())
+ownPathAnswered = do
+    (near, _, _) <- started False
+    (far, _, emitter) <- started False
+    (_, backToNear) <- tap "one" near far
+    Node.announce far (Destination.name carried) B.empty
+    Node.send near (asking (addressOf emitter) (Just (B.replicate 16 0x66)))
+    answered <- awaited backToNear response
+    pure (require "no path response came back" (isJust answered))
+
+taglessIgnored :: IO (Either String ())
+taglessIgnored = do
+    (near, _, _) <- started False
+    (far, _, emitter) <- started False
+    (_, backToNear) <- tap "one" near far
+    Node.announce far (Destination.name carried) B.empty
+    Node.send near (asking (addressOf emitter) Nothing)
+    threadDelay (1500 * 1000)
+    answers <- counting backToNear response
+    pure (expect "the answers to a request with no tag" 0 answers)
+
+twiceAsked :: IO (Either String ())
+twiceAsked = do
+    (near, _, _) <- started False
+    (far, _, emitter) <- started False
+    (_, backToNear) <- tap "one" near far
+    Node.announce far (Destination.name carried) B.empty
+    Node.send near (asking (addressOf emitter) (Just (B.replicate 16 0x77)))
+    Node.send near (asking (addressOf emitter) (Just (B.replicate 16 0x77)))
+    threadDelay (1500 * 1000)
+    answers <- counting backToNear response
+    pure (expect "the answers to the same request twice" 1 answers)

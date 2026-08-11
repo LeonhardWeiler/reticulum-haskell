@@ -11,6 +11,7 @@ module Reticulum.Node
     , inbound
     , send
     , announce
+    , requestPath
     , paths
     , clock
     , keypair
@@ -73,7 +74,8 @@ data Node = Node
     , links :: MVar (Transport.Links Interface)
     , announces :: MVar (Map DestinationHash Packet)
     , seen :: MVar (Set ByteString)
-    , local :: MVar (Set DestinationHash)
+    , local :: MVar (Map DestinationHash (Destination.NameHash, ByteString))
+    , requests :: MVar (Set ByteString)
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
     , sweeper :: Maybe ThreadId
     }
@@ -95,6 +97,7 @@ start how private handler = case Identity.toPublic private of
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Set.empty
+                <*> newMVar Map.empty
                 <*> newMVar Set.empty
         let built = node handler Nothing
         if transport how
@@ -127,10 +130,7 @@ taken :: Node -> Interface -> Packet -> IO ()
 taken node through packet = do
     crossings <- readMVar (links node)
     allowed <- modifyMVar (seen node) (pure . filtered crossings)
-    when allowed $
-        if Packet.packetType packet == Packet.Announce
-            then announced node through packet
-            else forwarding node (relay node through packet)
+    when allowed (sorted node through packet)
   where
     filtered crossings hashes
         | not verdict = (hashes, False)
@@ -140,6 +140,12 @@ taken node through packet = do
       where
         verdict = Transport.admitted (ours node) hashes packet
 
+sorted :: Node -> Interface -> Packet -> IO ()
+sorted node through packet
+    | Packet.packetType packet == Packet.Announce = announced node through packet
+    | Packet.address packet == Transport.pathRequestAddress = asked node through packet
+    | otherwise = forwarding node (relay node through packet)
+
 announced :: Node -> Interface -> Packet -> IO ()
 announced node through packet = case Announce.announce packet of
     Left _ -> pure ()
@@ -148,7 +154,7 @@ announced node through packet = case Announce.announce packet of
         | not (Announce.signatureValid address carried) -> pure ()
         | otherwise -> do
             mine <- readMVar (local node)
-            when (destination `Set.notMember` mine) $ do
+            when (destination `Map.notMember` mine) $ do
                 now <- clock
                 forwarding node (modifyMVar_ (waiting node) (pure . Transport.overheard now packet))
                 learned <- modifyMVar (table node) (pure . took now (entry carried))
@@ -279,22 +285,30 @@ send node packet = do
         Transport.Nowhere -> pure ()
 
 announce :: Node -> Name -> ByteString -> IO ()
-announce node called carried = do
-    random <- randomHash
-    case built random of
-        Left reason -> hPutStrLn stderr ("announce for " ++ show (Destination.nameBytes called) ++ ": " ++ reason)
-        Right (destination, packet) -> do
-            modifyMVar_ (local node) (pure . Set.insert destination)
-            send node packet
+announce node called carried = case Identity.toPublic (identity node) of
+    Left reason -> hPutStrLn stderr ("announce for " ++ show (Destination.nameBytes called) ++ ": " ++ reason)
+    Right key -> do
+        modifyMVar_ (local node) (pure . Map.insert (whose key) (hash, carried))
+        emit node hash carried Packet.None Nothing
   where
     hash = Destination.nameHash called
+    whose key = Destination.destinationHash hash (Just (Identity.identityHash key))
+
+emit :: Node -> Destination.NameHash -> ByteString -> Packet.Context -> Maybe Interface -> IO ()
+emit node hash carried told toward = do
+    random <- randomHash
+    case built random of
+        Left reason -> hPutStrLn stderr ("announce: " ++ reason)
+        Right packet -> case toward of
+            Nothing -> send node packet
+            Just through -> transmit through (Packet.pack packet)
+  where
     built random = do
         key <- Identity.toPublic (identity node)
         let destination = Destination.destinationHash hash (Just (Identity.identityHash key))
         body <- Announce.emitted (identity node) destination hash random carried
         pure
-            ( destination
-            , Packet
+            Packet
                 { Packet.contextFlag = False
                 , Packet.transportType = Packet.Broadcast
                 , Packet.destinationType = Packet.Single
@@ -302,10 +316,76 @@ announce node called carried = do
                 , Packet.hops = 0
                 , Packet.transportId = Nothing
                 , Packet.address = destinationHashBytes destination
-                , Packet.context = Packet.None
+                , Packet.context = told
                 , Packet.payload = Announce.pack body
                 }
-            )
+
+-- | A request with no tag reaches no duplicate check, and one already
+-- answered is answered once.
+asked :: Node -> Interface -> Packet -> IO ()
+asked node through packet = case Transport.pathRequest (Packet.payload packet) of
+    Left _ -> pure ()
+    Right wanted
+        | not (Transport.accepted wanted) -> pure ()
+        | otherwise -> do
+            first <- modifyMVar (requests node) (pure . noted wanted)
+            when first (answer node through wanted)
+  where
+    noted wanted tags = case Transport.uniqueTag wanted of
+        Nothing -> (tags, False)
+        Just unique -> (Set.insert unique tags, unique `Set.notMember` tags)
+
+-- | A destination of this node's own is announced again; one it only
+-- knows a path to is answered with the announce that path was learned
+-- from, and never toward the node the path runs through.
+answer :: Node -> Interface -> Transport.PathRequest -> IO ()
+answer node through wanted = do
+    mine <- readMVar (local node)
+    case Map.lookup destination mine of
+        Just (hash, carried) -> emit node hash carried Packet.PathResponse (Just through)
+        Nothing -> forwarding node $ do
+            reachable <- readMVar (table node)
+            cached <- readMVar (announces node)
+            now <- clock
+            case (Map.lookup destination reachable, Map.lookup destination cached) of
+                (Just path, Just announcement)
+                    | Transport.requesterId wanted /= Just (Path.via path) ->
+                        modifyMVar_
+                            (waiting node)
+                            (pure . respond now path announcement)
+                _ -> pure ()
+  where
+    destination = DestinationHash (Transport.wantedHash wanted)
+    respond now path announcement pending =
+        Map.insert
+            destination
+            (Transport.responding now through path announcement (Map.lookup destination pending))
+            pending
+
+requestPath :: Node -> DestinationHash -> IO ()
+requestPath node destination = do
+    tag <- Entropy.getEntropy Packet.addressLength
+    send node (asking tag)
+  where
+    asking tag =
+        Packet
+            { Packet.contextFlag = False
+            , Packet.transportType = Packet.Broadcast
+            , Packet.destinationType = Packet.Plain
+            , Packet.packetType = Packet.Data
+            , Packet.hops = 0
+            , Packet.transportId = Nothing
+            , Packet.address = Transport.pathRequestAddress
+            , Packet.context = Packet.None
+            , Packet.payload =
+                Transport.pack
+                    Transport.PathRequest
+                        { Transport.wantedHash = destinationHashBytes destination
+                        , Transport.requesterId =
+                            if transport (settings node) then Just (ours node) else Nothing
+                        , Transport.tag = Just tag
+                        }
+            }
 
 -- | The two curve scalars are entropy and nothing else.
 keypair :: IO Identity.PrivateKey

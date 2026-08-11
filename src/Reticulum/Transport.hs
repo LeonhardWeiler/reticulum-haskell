@@ -3,6 +3,8 @@
 module Reticulum.Transport
     ( PathRequest (..)
     , pathRequest
+    , pathRequestName
+    , pathRequestAddress
     , pack
     , uniqueTag
     , accepted
@@ -30,11 +32,13 @@ module Reticulum.Transport
     , due
     , rebroadcast
     , overheard
+    , responding
     , window
     ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as C
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -42,12 +46,23 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word8)
 
-import Reticulum.Destination (DestinationHash (DestinationHash))
+import Reticulum.Destination (DestinationHash (DestinationHash, destinationHashBytes), Name)
+import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Link as Link
 import Reticulum.Packet (Packet, Rejection (ShortPayload), addressLength)
 import qualified Reticulum.Packet as Packet
 import Reticulum.Path (Time (Time, seconds))
 import qualified Reticulum.Path as Path
+
+pathRequestName :: Name
+pathRequestName = Destination.name (C.pack "rnstransport.path.request")
+
+-- | The one destination every node answers on, and it belongs to no
+-- identity.
+pathRequestAddress :: ByteString
+pathRequestAddress =
+    destinationHashBytes
+        (Destination.destinationHash (Destination.nameHash pathRequestName) Nothing)
 
 data PathRequest = PathRequest
     { wantedHash :: ByteString
@@ -282,18 +297,18 @@ reverseLifetime = 8 * 60
 -- | A link request is answered along the link table and leaves nothing
 -- here.
 remember :: i -> i -> Time -> Packet -> Reverse i -> Reverse i
-remember from to now packet held
-    | Packet.packetType packet == Packet.LinkRequest = held
-    | otherwise = Map.insert (trace packet) (Return from to now) held
+remember from to now packet backwards
+    | Packet.packetType packet == Packet.LinkRequest = backwards
+    | otherwise = Map.insert (trace packet) (Return from to now) backwards
 
 -- | The proof carries half the hash of the packet it is for, and comes
 -- back on the interface that packet went out on or not at all.
 returned :: Eq i => i -> Packet -> Reverse i -> (Maybe i, Reverse i)
-returned through packet held = case Map.lookup (Packet.address packet) held of
-    Nothing -> (Nothing, held)
+returned through packet backwards = case Map.lookup (Packet.address packet) backwards of
+    Nothing -> (Nothing, backwards)
     Just entry ->
         ( if outward entry == through then Just (inward entry) else Nothing
-        , Map.delete (Packet.address packet) held
+        , Map.delete (Packet.address packet) backwards
         )
 
 forgotten :: Time -> Reverse i -> Reverse i
@@ -325,6 +340,7 @@ data Pending i = Pending
     , travelled :: Word8
     , arrived :: i
     , toward :: Maybe i
+    , held :: Maybe (Pending i)
     }
 
 type Waiting i = Map DestinationHash (Pending i)
@@ -344,6 +360,7 @@ queued now spread through packet
                 , travelled = Packet.hops packet
                 , arrived = through
                 , toward = Nothing
+                , held = Nothing
                 }
 
 due :: Time -> Waiting i -> ([Pending i], Waiting i)
@@ -352,7 +369,8 @@ due now = Map.foldrWithKey step ([], Map.empty)
     step destination entry (sending, kept)
         | retries entry > retransmits = (sending, kept)
         | sendAt entry > now = (sending, Map.insert destination entry kept)
-        | otherwise = (entry : sending, Map.insert destination (again entry) kept)
+        | otherwise = (entry : sending, Map.insert destination (after entry) kept)
+    after entry = fromMaybe (again entry) (held entry)
     again entry =
         entry {sendAt = later now (grace + window), retries = retries entry + 1}
 
@@ -384,6 +402,25 @@ overheard now packet waiting
                 else Just entry {rebroadcasts = grown entry}
         | otherwise = Just entry
     grown entry = rebroadcasts entry + 1
+
+pathGrace :: Double
+pathGrace = 0.4
+
+-- | The wait before the answer lets a node closer to the destination
+-- answer first, and what is held is put back once it is sent.
+responding :: Time -> i -> Path.Path i -> Packet -> Maybe (Pending i) -> Pending i
+responding now asker path announcement waiting =
+    Pending
+        { announce = announcement
+        , sendAt = later now pathGrace
+        , retries = retransmits
+        , rebroadcasts = 0
+        , blocked = True
+        , travelled = Path.hops path
+        , arrived = Path.interface path
+        , toward = Just asker
+        , held = waiting
+        }
 
 later :: Time -> Double -> Time
 later now offset = Time (seconds now + offset)
