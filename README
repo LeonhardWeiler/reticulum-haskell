@@ -52,7 +52,7 @@ Layout
 
     src/Reticulum/     the library: the codec is pure, the node is IO
     cmd/harness/       the corpus harness, linked to ./harness by check
-    cmd/node/          a node on one TCP interface
+    cmd/node/          a node on TCP interfaces, dialled and answered
     test/              what the corpus cannot hold
     .github/workflows/ one job, and it runs ./check
     CLAUDE.md          the rules this repository is written under
@@ -81,18 +81,26 @@ vector can be rebuilt at all.
 
 The node
 
-    node [-t] <host> <port> [<destination name> [<identity file>]]
+    node [-t] [-l <port>] [-n <name>] [-k <file>] [<host>:<port> ...]
 
-Dials one TCP peer, and prints a line for every announce it takes into
-its path table: the destination, the hops it is away, the interface it
-came on, and the app data. Given a name it announces that destination
-once, under the identity in the file, which is written if it is not
-there. Log lines go to standard error.
+    -t          be a transport node
+    -l <port>   listen, and take every connection as an interface
+    -n <name>   announce this destination once
+    -k <file>   the identity, written if the file is not there
 
-With -t the node is a transport node: it carries announces onward, and
-a packet naming it as the next hop goes on toward the destination its
-path table knows. A proof for such a packet goes back the way that
-packet came. Without -t the node listens and forwards nothing.
+Dials every peer given and answers on the port given, and prints a line
+for every announce it takes into its path table: the destination, the
+hops it is away, the interface it came on, and the app data. It needs
+at least one of the two, a peer or a port. Log lines go to standard
+error.
+
+With -t the node is a transport node: it carries announces onward, a
+packet naming it as the next hop goes on toward the destination its
+path table knows, and a path request it can answer is answered from
+the announce it kept. A proof for a packet it passed on goes back the
+way that packet came, and a link opened across it keeps running.
+Without -t the node listens, answers path requests for its own
+destination, and forwards nothing.
 
 The path table is what an announce leaves behind. A shorter path is
 taken only when it was emitted later than the one on file, and an
