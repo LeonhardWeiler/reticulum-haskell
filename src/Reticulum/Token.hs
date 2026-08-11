@@ -8,12 +8,13 @@ module Reticulum.Token
     , keys
     , hmacValid
     , open
+    , seal
     , tokenOverhead
     , blockSize
     ) where
 
 import Crypto.Cipher.AES (AES256)
-import Crypto.Cipher.Types (cbcDecrypt, cipherInit, makeIV)
+import Crypto.Cipher.Types (cbcDecrypt, cbcEncrypt, cipherInit, makeIV)
 import Crypto.Error (CryptoFailable, maybeCryptoError)
 import qualified Crypto.Hash as Hash
 import qualified Crypto.MAC.HMAC as HMAC
@@ -79,6 +80,24 @@ open :: Keys -> Token -> Maybe ByteString
 open key value
     | hmacValid key value = unpad =<< decrypt (encryptionKey key) (iv value) (ciphertext value)
     | otherwise = Nothing
+
+seal :: Keys -> ByteString -> ByteString -> Maybe Token
+seal key vector plain = do
+    block <- encrypt (encryptionKey key) vector (pad plain)
+    Just (Token vector block (mac (signingKey key) (vector <> block)))
+
+encrypt :: ByteString -> ByteString -> ByteString -> Maybe ByteString
+encrypt key vector block = do
+    cipher <- maybeCryptoError (cipherInit key :: CryptoFailable AES256)
+    start <- makeIV vector
+    Just (cbcEncrypt cipher start block)
+
+-- | A plaintext that already fills the last block is followed by a whole
+-- block of padding.
+pad :: ByteString -> ByteString
+pad plain = plain <> B.replicate added (fromIntegral added)
+  where
+    added = blockSize - B.length plain `mod` blockSize
 
 decrypt :: ByteString -> ByteString -> ByteString -> Maybe ByteString
 decrypt key vector block

@@ -3,6 +3,7 @@ module Main (main) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
 import Control.Monad (when)
+import Data.Bits (xor)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
@@ -15,12 +16,14 @@ import System.Exit (exitFailure)
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 
 import qualified Reticulum.Destination as Destination
+import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Link as Link
 import qualified Reticulum.Node as Node
 import qualified Reticulum.Packet as Packet
 import Reticulum.Path (Time (Time))
 import qualified Reticulum.Path as Path
+import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
 main :: IO ()
@@ -33,7 +36,11 @@ main = do
 
 checks :: [(String, IO (Either String ()))]
 checks =
-    [ ("a path response is not queued", pure notQueued)
+    [ ("a token opens what it sealed", pure opensWhatItSealed)
+    , ("a sealed token is padded to the block", pure paddedToTheBlock)
+    , ("a token whose hmac was altered opens nothing", pure alteredOpensNothing)
+    , ("what is sealed for an identity opens with its key", pure sealedForAnIdentity)
+    , ("a path response is not queued", pure notQueued)
     , ("an announce goes out twice", pure emptiedTwice)
     , ("a rebroadcast heard once is counted", pure counted)
     , ("a rebroadcast heard twice ends the entry", pure enough)
@@ -78,6 +85,62 @@ expect what wanted got
 
 require :: String -> Bool -> Either String ()
 require what met = if met then Right () else Left what
+
+vector :: ByteString
+vector = B.replicate Token.blockSize 0x0f
+
+sealingKeys :: Token.Keys
+sealingKeys = Token.keys (B.replicate Encryption.derivedKeyLength 0x09)
+
+opensWhatItSealed :: Either String ()
+opensWhatItSealed = case mapM sealing plaintexts of
+    Nothing -> Left "a plaintext was not sealed"
+    Just read' -> expect "what came back out" (map Just plaintexts) read'
+  where
+    plaintexts = [B.empty, C.pack "one packet", B.replicate 16 0x41, B.replicate 400 0x42]
+    sealing plain = Token.open sealingKeys <$> Token.seal sealingKeys vector plain
+
+paddedToTheBlock :: Either String ()
+paddedToTheBlock =
+    expect "the ciphertext lengths" (Just [16, 16, 32]) (mapM sizeOf [0, 15, 16])
+  where
+    sizeOf size =
+        B.length . Token.ciphertext <$> Token.seal sealingKeys vector (B.replicate size 0x41)
+
+alteredOpensNothing :: Either String ()
+alteredOpensNothing = case Token.seal sealingKeys vector (C.pack "one packet") of
+    Nothing -> Left "the plaintext was not sealed"
+    Just made ->
+        require "an altered token opened" $
+            isNothing (Token.open sealingKeys made {Token.hmac = flipped (Token.hmac made)})
+  where
+    flipped = B.map (`xor` 0x01)
+
+sealedForAnIdentity :: Either String ()
+sealedForAnIdentity = do
+    secret <- Identity.privateKey (B.replicate Identity.keySize 0x01)
+    key <- Identity.toPublic secret
+    let salt = Identity.identityHashBytes (Identity.identityHash key)
+        spoken = C.pack "over the link"
+    case Encryption.sealed ephemeral (Identity.x25519Public key) salt vector spoken of
+        Nothing -> Left "the plaintext was not sealed"
+        Just made -> do
+            expect
+                "what the identity read"
+                (Just spoken)
+                (Encryption.opened (Identity.x25519Private secret) salt made)
+            expect
+                "what another salt read"
+                Nothing
+                (Encryption.opened (Identity.x25519Private secret) elsewhere made)
+            carried' <- either (const (Left "the payload did not read back")) Right $
+                Encryption.encrypted (Encryption.pack made)
+            expect
+                "what the payload read back as"
+                (Just spoken)
+                (Encryption.opened (Identity.x25519Private secret) salt carried')
+  where
+    ephemeral = B.replicate Encryption.ephemeralLength 0x05
 
 announced :: Word8 -> Maybe ByteString -> Packet.Packet
 announced travelled through =

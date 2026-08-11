@@ -4,6 +4,8 @@ module Reticulum.Encryption
     ( Encrypted (..)
     , encrypted
     , pack
+    , sealed
+    , opened
     , shared
     , derive
     , publicPoint
@@ -45,6 +47,23 @@ encrypted payload
 
 pack :: Encrypted -> ByteString
 pack value = ephemeralPublic value <> Token.pack (token value)
+
+-- | The salt is the hash of the identity the plaintext is for, and the
+-- ephemeral point travels in front of the token.
+sealed
+    :: ByteString -> ByteString -> ByteString -> ByteString -> ByteString -> Maybe Encrypted
+sealed ephemeral peer salt vector plain = do
+    point <- publicPoint ephemeral
+    agreed <- shared ephemeral peer
+    Encrypted point <$> Token.seal (agreedKeys agreed salt) vector plain
+
+opened :: ByteString -> ByteString -> Encrypted -> Maybe ByteString
+opened scalar salt value = do
+    agreed <- shared scalar (ephemeralPublic value)
+    Token.open (agreedKeys agreed salt) (token value)
+
+agreedKeys :: ByteString -> ByteString -> Token.Keys
+agreedKeys agreed salt = Token.keys (derive derivedKeyLength agreed salt)
 
 -- | An agreement against a point of small order is all zeroes, which
 -- neither end contributed to and every reader of the announce can
