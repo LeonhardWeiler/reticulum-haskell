@@ -49,6 +49,7 @@ checks =
     , ("a packet sealed for another key is not taken", notOpened)
     , ("a link this node answers takes what crosses it and proves it", linkAnswered)
     , ("a link this node opens carries what it says and is proved back", linkOpened)
+    , ("a request this node sends is answered under the id it named", requestSent)
     , ("a request on a link is answered on the path it names", requestAnswered)
     , ("a resource is taken in parts and proved", resourceTaken False)
     , ("a resource that is compressed is taken", resourceTaken True)
@@ -441,7 +442,13 @@ gathered kept = fromMaybe [] <$> waitFor (some <$> readIORef kept)
     some values = if null values then Nothing else Just values
 
 quiet :: Node.Answering
-quiet = Node.Answering (const (pure ())) (const (pure ())) Map.empty (const (pure ()))
+quiet =
+    Node.Answering
+        (const (pure ()))
+        (const (pure ()))
+        Map.empty
+        (const (pure ()))
+        (\_ _ -> pure ())
 
 waitFor :: IO (Maybe a) -> IO (Maybe a)
 waitFor look = go (60 :: Int)
@@ -679,11 +686,8 @@ linkAnswered = do
 -- node's own: what crossed it, and the proof that came back for it.
 linkOpened :: IO (Either String ())
 linkOpened = do
-    (near, _, _) <- started False
-    (far, _, emitter) <- started False
-    wire "one" near far
     took <- newIORef []
-    holding far quiet {Node.delivered = keeping took}
+    (near, emitter) <- twoNodes quiet {Node.delivered = keeping took}
     found <- waitFor (reached near emitter)
     case found of
         Nothing -> pure (Left "the announce did not arrive")
@@ -704,6 +708,47 @@ linkOpened = do
                         require "the link did not open" (isJust sent)
                         expect "what crossed the link" [overTheLink] arrived
                         expect "the hash the proof named" (maybe [] pure sent) proved
+
+-- | Both ends this node's own: the request one sends, the path the
+-- other serves, and the answer filed under the id of the packet that
+-- asked.
+requestSent :: IO (Either String ())
+requestSent = do
+    (near, emitter) <- twoNodes quiet {Node.requested = Map.singleton path (pure . Just . B.reverse)}
+    found <- waitFor (reached near emitter)
+    case found of
+        Nothing -> pure (Left "the announce did not arrive")
+        Just _ -> do
+            answers <- newIORef []
+            opened <-
+                Node.open
+                    near
+                    (Destination.DestinationHash (addressOf emitter))
+                    quiet {Node.answered = \named body -> keeping answers (named, body)}
+            case opened of
+                Left reason -> pure (Left reason)
+                Right link -> do
+                    sent <- waitFor (Node.ask near link echo spoken)
+                    given <- gathered answers
+                    pure $ do
+                        require "the request did not go" (isJust sent)
+                        expect
+                            "the answer and the id it names"
+                            [(fromMaybe B.empty sent, B.reverse spoken)]
+                            given
+  where
+    echo = C.pack "echo"
+    path = Request.named echo
+
+-- | One node that holds a destination and announces it, and one that
+-- has heard it.
+twoNodes :: Node.Answering -> IO (Node.Node, Identity.IdentityHash)
+twoNodes hears = do
+    (near, _, _) <- started False
+    (far, _, emitter) <- started False
+    wire "one" near far
+    holding far hears
+    pure (near, emitter)
 
 asked :: ByteString -> ByteString -> ByteString
 asked path body =

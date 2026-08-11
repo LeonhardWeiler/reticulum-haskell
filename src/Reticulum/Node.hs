@@ -15,6 +15,7 @@ module Reticulum.Node
     , serve
     , open
     , speak
+    , ask
     , announce
     , requestPath
     , paths
@@ -84,6 +85,7 @@ data Answering = Answering
     , assembled :: ByteString -> IO ()
     , requested :: Map ByteString (ByteString -> IO (Maybe ByteString))
     , proved :: ByteString -> IO ()
+    , answered :: ByteString -> ByteString -> IO ()
     }
 
 data Local = Local
@@ -292,6 +294,7 @@ spoken node through session packet
         Packet.LinkIdentify -> mapM_ names (opened (Packet.payload packet))
         Packet.LinkClose -> mapM_ closes (opened (Packet.payload packet))
         Packet.Request -> mapM_ (asking session packet) (opened (Packet.payload packet))
+        Packet.Response -> mapM_ given (opened (Packet.payload packet))
         Packet.ResourceAdv -> mapM_ (advertised node session link) (opened (Packet.payload packet))
         Packet.Resource -> piece node session link (Packet.payload packet)
         Packet.ResourceHmu -> mapM_ (updated node session link) (opened (Packet.payload packet))
@@ -306,6 +309,12 @@ spoken node through session packet
             | B.length signed == Identity.signatureLength
             , Identity.verify (signer session) hash signed ->
                 proved (answering session) hash
+        _ -> pure ()
+    given plain = case Request.response plain of
+        Right back
+            | Just identifier <- Request.requestId back
+            , Just body <- Request.responseBody back ->
+                answered (answering session) identifier body
         _ -> pure ()
     names plain = case Link.identify plain of
         Just who
@@ -784,6 +793,23 @@ speak node link plain = do
     case Map.lookup link running of
         Nothing -> pure Nothing
         Just session -> fmap Packet.packetHash <$> sending session link Packet.None plain
+
+-- | The answer names the packet that asked, so what comes back is the
+-- id that end will hash out of it.
+ask :: Node -> ByteString -> ByteString -> ByteString -> IO (Maybe ByteString)
+ask node link path body = do
+    running <- readMVar (sessions node)
+    now <- clock
+    case Map.lookup link running of
+        Nothing -> pure Nothing
+        Just session -> asking' session (Request.packRequest (Path.seconds now) (Request.named path) body)
+  where
+    asking' session packed
+        | B.length packed > Link.capacity (unit session) =
+            Nothing <$ hPutStrLn stderr ("request: " ++ show (B.length packed) ++ " bytes")
+        | otherwise =
+            fmap (Identity.truncatedHash . Packet.hashablePart)
+                <$> sending session link Packet.Request packed
 
 announce :: Node -> DestinationHash -> IO ()
 announce node destination = do

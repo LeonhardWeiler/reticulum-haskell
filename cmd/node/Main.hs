@@ -120,6 +120,7 @@ announcing node name = do
                     , (Request.named (C.pack "length"), pure . Just . counted)
                     ]
             , Node.proved = const (pure ())
+            , Node.answered = \_ _ -> pure ()
             }
     counted plain = C.pack (show (B.length plain))
 

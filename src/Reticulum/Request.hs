@@ -3,6 +3,7 @@
 module Reticulum.Request
     ( Request (..)
     , request
+    , packRequest
     , Response (..)
     , response
     , packResponse
@@ -30,6 +31,11 @@ request plain
     | otherwise = Right (Request (float packed 0) (binary packed 1) (binary packed 2))
   where
     packed = Msgpack.unpack plain
+
+packRequest :: Double -> ByteString -> ByteString -> ByteString
+packRequest sent path body =
+    Msgpack.pack
+        (Msgpack.Array [Msgpack.double sent, Msgpack.Bytes path, Msgpack.Bytes body])
 
 -- | The id names the request packet the receiver hashed, not the
 -- request it carried.
