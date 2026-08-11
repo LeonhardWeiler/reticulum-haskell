@@ -658,6 +658,9 @@ encode kind fields = case kind of
                 ["recipient_private", "ratchet_private"]
                 (Encryption.pack <$> (Encryption.Encrypted <$> part fields "ephemeral_public" <*> sealed fields))
             )
+    "linkrequest" -> Just (rebuilt [] (requesting fields))
+    "linkproof" -> Just (rebuilt ["link_request", "signer_public"] (proving fields))
+    "linkdata" -> Just (rebuilt ["link_request", "responder_private"] (onLink fields))
     _ -> Nothing
   where
     echoed = mapM (written fields)
@@ -666,6 +669,31 @@ encode kind fields = case kind of
         first <- echoed echoes
         built <- packed fields =<< body
         pure (first ++ [hex built])
+
+requesting :: Fields -> Either String ByteString
+requesting fields =
+    fmap Link.packRequest $
+        Link.Request
+            <$> part fields "x25519_public"
+            <*> part fields "ed25519_public"
+            <*> given fields "signalling"
+
+proving :: Fields -> Either String ByteString
+proving fields =
+    fmap Link.packRequestProof $
+        Link.RequestProof
+            <$> part fields "signature"
+            <*> part fields "x25519_public"
+            <*> given fields "signalling"
+
+-- | Which of the two a link packet holds is the packet's own rule, and
+-- the payload it is asked about does not enter into it.
+onLink :: Fields -> Either String ByteString
+onLink fields = do
+    shape <- shaped fields B.empty
+    if Packet.encrypted shape
+        then Token.pack <$> sealed fields
+        else part fields "plaintext"
 
 sealed :: Fields -> Either String Token.Token
 sealed fields =
@@ -709,7 +737,10 @@ asking fields = do
         )
 
 packed :: Fields -> ByteString -> Either String ByteString
-packed fields body = do
+packed fields body = Packet.pack <$> shaped fields body
+
+shaped :: Fields -> ByteString -> Either String Packet.Packet
+shaped fields body = do
     flagged <- keyword fields "context_flag" [("set", True), ("unset", False)]
     transport <-
         keyword
@@ -739,19 +770,17 @@ packed fields body = do
     hashed <- part fields "destination_hash"
     named <- contextOf fields
     pure
-        ( Packet.pack
-            Packet.Packet
-                { Packet.contextFlag = flagged
-                , Packet.transportType = transport
-                , Packet.destinationType = toward
-                , Packet.packetType = kind
-                , Packet.hops = fromIntegral count
-                , Packet.transportId = relay
-                , Packet.address = hashed
-                , Packet.context = named
-                , Packet.payload = body
-                }
-        )
+        Packet.Packet
+            { Packet.contextFlag = flagged
+            , Packet.transportType = transport
+            , Packet.destinationType = toward
+            , Packet.packetType = kind
+            , Packet.hops = fromIntegral count
+            , Packet.transportId = relay
+            , Packet.address = hashed
+            , Packet.context = named
+            , Packet.payload = body
+            }
 
 contextOf :: Fields -> Either String Packet.Context
 contextOf fields = do

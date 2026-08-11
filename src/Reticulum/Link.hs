@@ -3,8 +3,10 @@
 module Reticulum.Link
     ( Request (..)
     , request
+    , packRequest
     , RequestProof (..)
     , requestProof
+    , packRequestProof
     , signedData
     , signatureValid
     , Handshake (..)
@@ -66,6 +68,14 @@ request payload
     half = publicKeysLength `div` 2
     drawn = Request (B.take half payload) (B.take half (B.drop half payload))
 
+packRequest :: Request -> ByteString
+packRequest value =
+    B.concat
+        [ x25519Public value
+        , ed25519Public value
+        , fromMaybe B.empty (requestSignalling value)
+        ]
+
 -- | The responder's Ed25519 key is in no packet, and only the half the
 -- initiator needs for the agreement is sent.
 data RequestProof = RequestProof
@@ -86,6 +96,14 @@ requestProof payload
         RequestProof
             (B.take Identity.signatureLength payload)
             (B.take (publicKeysLength `div` 2) (B.drop Identity.signatureLength payload))
+
+packRequestProof :: RequestProof -> ByteString
+packRequestProof value =
+    B.concat
+        [ signature value
+        , responderPublic value
+        , fromMaybe B.empty (proofSignalling value)
+        ]
 
 proofLength :: Int
 proofLength = Identity.signatureLength + publicKeysLength `div` 2
