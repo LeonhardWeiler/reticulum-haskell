@@ -1,5 +1,3 @@
--- | The corpus's cmd/dump, over this implementation. The contract is
--- corpus doc/harness; the six rules it names are cited by number below.
 module Main (main) where
 
 import qualified Data.ByteArray.Encoding as Encoding
@@ -23,7 +21,8 @@ main = do
         [kind, path] -> do
             blobs <- readBlobs path
             case dump kind blobs of
-                -- Rule 3. Nothing else may use this status.
+                -- 77 says the kind is not implemented, and nothing else
+                -- may use it.
                 Nothing -> exitWith (ExitFailure 77)
                 Just (Left reason) -> die (path ++ ": " ++ reason)
                 Just (Right fields) -> mapM_ (putStrLn . render) fields
@@ -32,9 +31,8 @@ main = do
             name <- getProgName
             die ("usage: " ++ name ++ " <kind> <rawfile>")
 
--- | Nothing for a kind this harness does not implement, Left for a raw
--- that does not carry what the kind is defined to hold. The second is a
--- broken vector, not a measurement.
+-- | Nothing for a kind this harness has not implemented, Left for a raw
+-- that does not carry what the kind holds.
 dump :: String -> [Maybe ByteString] -> Maybe (Either String [Field])
 dump kind blobs = case kind of
     "identity" -> Just (identity <$> blob 0 "public key")
@@ -49,12 +47,9 @@ dump kind blobs = case kind of
   where
     blob index what = maybe (Left ("raw carries no " ++ what)) Right (blobs `at` index)
 
--- | corpus doc/identity, vector format: identity.
 identity :: ByteString -> [Field]
 identity raw = gated (Identity.publicKey raw) publicKeyFields
 
--- | corpus doc/identity, vector format: keyset. The public half is
--- gated a second time, on the derivation rather than on the blob.
 keyset :: ByteString -> [Field]
 keyset raw =
     gated key
@@ -74,9 +69,6 @@ publicKeyFields =
     , ("identity_hash", Hex . Identity.identityHashBytes . Identity.identityHash)
     ]
 
--- | corpus doc/destination. The second blob is the identity hash, and
--- a name has none as often as it has one. identity_hash is that blob
--- echoed: it is an input here, not something derived.
 destination :: ByteString -> Maybe ByteString -> [Field]
 destination rawName rawIdentity =
     [ ("name", Hex (Destination.nameBytes name))
@@ -93,9 +85,6 @@ destination rawName rawIdentity =
     holder = Identity.IdentityHash <$> rawIdentity
     address = Destination.destinationHash hash holder
 
--- | corpus doc/identity, vector format: signature. The message is
--- recorded by length and digest, which is what makes this kind and the
--- one below the only two the corpus cannot rebuild raw from.
 signature :: ByteString -> ByteString -> ByteString -> [Field]
 signature rawKey message rawSignature =
     gated key [("ed25519_public", Hex . Identity.ed25519Public)]
@@ -107,8 +96,6 @@ signature rawKey message rawSignature =
     key = Identity.publicKey rawKey
     verified = (\k -> Identity.validate k message rawSignature) <$> key
 
--- | corpus doc/identity, vector format: sign. The signature is the
--- answer here rather than an input, and there is no verdict field.
 signed :: ByteString -> ByteString -> [Field]
 signed rawKey message =
     gated key
@@ -127,7 +114,6 @@ recorded message =
     , ("message_sha256", Hex (Identity.fullHash message))
     ]
 
--- | corpus doc/announce.
 announce :: ByteString -> [Field]
 announce raw = packet raw $ \unpacked ->
     fields (Packet.address unpacked) <$> Announce.announce unpacked
@@ -146,9 +132,6 @@ announce raw = packet raw $ \unpacked ->
         , ("signature_valid", verdict (Announce.signatureValid address value))
         ]
 
--- | corpus doc/packet, section Plain destinations. The payload is the
--- data: encryption to a plain destination returns the plaintext
--- unchanged, so there is nothing between the two fields and the packet.
 plain :: ByteString -> [Field]
 plain raw = packet raw $ \unpacked ->
     Right
@@ -156,7 +139,6 @@ plain raw = packet raw $ \unpacked ->
         , ("plaintext", Hex (Packet.payload unpacked))
         ]
 
--- | corpus doc/packet, section Path requests.
 pathrequest :: ByteString -> [Field]
 pathrequest raw = packet raw $ \unpacked ->
     fields <$> Transport.pathRequest (Packet.payload unpacked)
@@ -169,9 +151,6 @@ pathrequest raw = packet raw $ \unpacked ->
         , ("accepted", verdict (Transport.accepted request))
         ]
 
--- | A packet that broke a rule carries the rule and nothing else, and a
--- payload that broke one leaves no header standing either: these rules
--- all say the packet was not read.
 packet :: ByteString -> (Packet.Packet -> Either Packet.Rejection [Field]) -> [Field]
 packet raw fields = case Packet.unpack raw of
     Left reason -> rejection reason
@@ -205,9 +184,8 @@ header unpacked =
         Packet.LinkRequest -> "linkrequest"
         Packet.Proof -> "proof"
 
--- | Rule 2. The format spells a context as a keyword only where a
--- vector carries that byte. Three the reference defines and this
--- implementation names have no keyword, and print as the byte.
+-- | The field format spells a context as a keyword only where a vector
+-- carries the byte, so three of them print as the byte instead.
 context :: Packet.Context -> Value
 context named = case named of
     Packet.None -> Keyword "none"
@@ -253,8 +231,6 @@ rejection broken = case broken of
         , ("minimum_length", Dec needed)
         ]
 
--- Fields
-
 data Value
     = Hex ByteString
     | Dec Int
@@ -263,21 +239,13 @@ data Value
 
 type Field = (String, Value)
 
-byte :: Word8 -> Value
-byte = Hex . B.singleton
-
-verdict :: Bool -> Value
-verdict held = Keyword (if held then "yes" else "no")
-
--- | Rule 6. What the implementation refused is a dash, and the fields
--- it does not gate still stand.
+-- | A field the implementation produced nothing for is a dash, and the
+-- fields it does not gate still stand.
 gated :: Either e a -> [(String, a -> Value)] -> [Field]
 gated (Left _) fields = [(name, Absent) | (name, _) <- fields]
 gated (Right value) fields = [(name, of' value) | (name, of') <- fields]
 
--- | Rule 5, in the one place it belongs: the name in 18 columns, the
--- value after it, and the empty byte string as a dash because hex
--- cannot spell one.
+-- | The empty byte string is a dash because hex cannot spell one.
 render :: Field -> String
 render (name, value) = name ++ replicate (nameColumns - length name) ' ' ++ " " ++ text value
   where
@@ -289,10 +257,12 @@ render (name, value) = name ++ replicate (nameColumns - length name) ' ' ++ " " 
         | B.null bytes = "-"
         | otherwise = C.unpack (Encoding.convertToBase Encoding.Base16 bytes)
 
--- Raw
+byte :: Word8 -> Value
+byte = Hex . B.singleton
 
--- | raw is one blob per line, hex, or a dash where the kind admits an
--- absent one. No blob carries a space, so the lines are the words.
+verdict :: Bool -> Value
+verdict held = Keyword (if held then "yes" else "no")
+
 readBlobs :: FilePath -> IO [Maybe ByteString]
 readBlobs path = mapM blob . C.words =<< B.readFile path
   where

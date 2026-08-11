@@ -1,6 +1,5 @@
 {-# LANGUAGE StrictData #-}
 
--- | RNS/Destination.py
 module Reticulum.Destination
     ( Name (nameBytes, appName, aspects)
     , name
@@ -18,10 +17,6 @@ import Data.Word (Word8)
 import Reticulum.Identity (IdentityHash (identityHashBytes))
 import qualified Reticulum.Identity as Identity
 
--- | An app name followed by zero or more aspects, joined with a single
--- dot. A component may be empty; nothing forbids it.
---
--- RNS/Destination.py#app_and_aspects_from_name
 data Name = Name
     { nameBytes :: ByteString
     , appName :: ByteString
@@ -33,14 +28,10 @@ dot = 0x2e
 
 name :: ByteString -> Name
 name bytes = case B.split dot bytes of
-    -- An empty name splits into no components here and into one empty
-    -- one in Python, where the app name is that empty component.
+    -- An empty name has an empty app name and no aspects.
     [] -> Name bytes B.empty []
     (app : rest) -> Name bytes app rest
 
--- | RNS/Destination.py#expand_name, with the identity left out: the
--- path that appends it produces the human-readable name only and is
--- not the one the hashes are derived through.
 fromComponents :: ByteString -> [ByteString] -> Either String Name
 fromComponents app parts
     | any (B.elem dot) components = Left "dots can't be used in app names or aspects"
@@ -52,15 +43,11 @@ newtype NameHash = NameHash {nameHashBytes :: ByteString}
 
 newtype DestinationHash = DestinationHash {destinationHashBytes :: ByteString}
 
--- | RNS/Destination.py#hash. The name is hashed as its utf-8 bytes
--- exactly as given: no unicode normalisation, so a precomposed name
--- and its decomposed form are two destinations.
+-- | The name is hashed as the bytes it was given, and normalising them
+-- makes a different destination.
 nameHash :: Name -> NameHash
 nameHash = NameHash . B.take Identity.nameHashLength . Identity.fullHash . nameBytes
 
--- | RNS/Destination.py#hash. The identity is mixed in here, after the
--- name has been hashed, and not as part of the name. Without one the
--- material is the name hash alone.
 destinationHash :: NameHash -> Maybe IdentityHash -> DestinationHash
 destinationHash hash identity =
     DestinationHash (Identity.truncatedHash (nameHashBytes hash <> material))

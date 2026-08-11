@@ -1,6 +1,5 @@
 {-# LANGUAGE StrictData #-}
 
--- | RNS/Packet.py
 module Reticulum.Packet
     ( Packet (..)
     , unpack
@@ -24,34 +23,26 @@ import Data.Word (Word8)
 
 import qualified Reticulum.Identity as Identity
 
--- | RNS/Transport.py#PATHFINDER_M
 pathfinderM :: Int
 pathfinderM = 128
 
--- | RNS/Packet.py#unpack calls it DST_LEN.
 addressLength :: Int
 addressLength = Identity.truncatedHashLength
 
 data HeaderType = Header1 | Header2
     deriving (Eq)
 
--- | Bit 4 is one bit wide. RNS names four transport types and only two
--- of them fit on the wire.
---
--- RNS/Transport.py#BROADCAST, RNS/Transport.py#TRANSPORT
+-- | The flags carry one bit for this, so of the four transport types
+-- only two fit on the wire.
 data TransportType = Broadcast | Transport
     deriving (Eq)
 
--- | RNS/Destination.py#SINGLE and the three beside it.
 data DestinationType = Single | Group | Plain | Link
     deriving (Eq)
 
--- | RNS/Packet.py#DATA and the three beside it.
 data PacketType = Data | Announce | LinkRequest | Proof
     deriving (Eq)
 
--- | RNS/Packet.py, the packet context types. What the payload holds.
--- Which names are meaningful depends on the packet type.
 data Context
     = None
     | Resource
@@ -131,8 +122,6 @@ toContext value = case lookup value [(contextByte c, c) | c <- names] of
         , LinkRequestProof
         ]
 
--- | The rules a decoder can break, and the numbers behind each. The
--- names are the corpus's invalid field; corpus doc/fields, Rejection.
 data Rejection
     = -- | bytes present, bytes needed
       ShortHeader Int Int
@@ -142,10 +131,9 @@ data Rejection
       ShortPayload Int Int
     deriving (Eq)
 
--- | The address field is not always a destination hash: a link request
--- proof carries the link id there and a delivery proof the first half
--- of a packet hash. Sixteen bytes either way, so it is not one of the
--- hash newtypes.
+-- | The address is a destination hash for every packet but two: a link
+-- request proof carries a link id there and a delivery proof half a
+-- packet hash.
 data Packet = Packet
     { flags :: Word8
     , headerType :: HeaderType
@@ -164,10 +152,6 @@ headerLength :: HeaderType -> Int
 headerLength Header1 = 2 + addressLength + 1
 headerLength Header2 = 2 + 2 * addressLength + 1
 
--- | RNS/Packet.py#unpack. The hop count is checked before the header
--- is laid out, so a packet over the limit is refused whatever else is
--- wrong with it; the two bytes it takes to read the flags are the one
--- threshold that is not the length of something.
 unpack :: ByteString -> Either Rejection Packet
 unpack raw = case B.unpack (B.take 2 raw) of
     [flagsByte, hopCount]
@@ -195,8 +179,6 @@ unpack raw = case B.unpack (B.take 2 raw) of
                         }
       where
         header = if testBit flagsByte 6 then Header2 else Header1
-        -- The transport id is inserted before the destination hash,
-        -- not after it.
         addressAt = case header of
             Header1 -> 2
             Header2 -> 2 + addressLength
