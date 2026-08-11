@@ -52,6 +52,7 @@ Layout
 
     src/Reticulum/     the library: the codec is pure, the node is IO
     cmd/harness/       the corpus harness, linked to ./harness by check
+    .github/workflows/ one job, and it runs ./check
     CLAUDE.md          the rules this repository is written under
     CORPUS             the pin
     DEPENDS            every dependency past base and the crypto library,

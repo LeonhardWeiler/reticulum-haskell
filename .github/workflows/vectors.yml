@@ -1,0 +1,27 @@
+# The corpus, on every commit. There is no pin here: CORPUS holds it,
+# check reads it, and check refuses a result whose fingerprint is not
+# the one on file.
+name: vectors
+
+on: [push, pull_request]
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The one thing a runner needs that the repository does not carry.
+      # flake.nix names the compiler and flake.lock pins the package
+      # set, so what runs here is what nix develop gives locally.
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      # A step runs under bash -e without pipefail, and the exit status
+      # of a pipeline is its last command's, so the verdict would
+      # otherwise come from tee.
+      - name: Check against the corpus
+        run: |
+          set -o pipefail
+          nix develop --command ./check | tee -a "$GITHUB_STEP_SUMMARY"
