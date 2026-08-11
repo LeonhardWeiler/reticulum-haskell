@@ -778,7 +778,7 @@ resourceGiven size = do
 grain :: Int -> ByteString
 grain size = B.take size (B.concat (take (size `div` Identity.hashLength + 1) grains))
   where
-    grains = iterate Identity.fullHash (C.pack "the resource this node hands over")
+    grains = drop 1 (iterate Identity.fullHash (C.pack "the resource this node hands over"))
 
 -- | One node that holds a destination and announces it, and one that
 -- has heard it.

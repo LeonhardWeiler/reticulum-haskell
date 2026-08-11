@@ -80,6 +80,15 @@ for _ in range(60):
         break
 print("request as resource:", answers[1] if len(answers) > 1 else None, flush=True)
 
+# The answer to this one is as long as what was asked, so it comes back
+# as a resource and not in a packet.
+link.request("echo", data=long, response_callback=answered)
+for _ in range(60):
+    time.sleep(0.5)
+    if len(answers) > 2:
+        break
+print("long response:", len(answers[2]) if len(answers) > 2 else None, flush=True)
+
 RNS.Resource(os.urandom(3000), link, callback=lambda resource: concluded.append(resource))
 for _ in range(60):
     time.sleep(0.5)

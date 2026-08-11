@@ -4,12 +4,13 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (forever, void)
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
+import Data.ByteArray.Encoding (Base (Base16), convertFromBase, convertToBase)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isNothing)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.Maybe (fromMaybe, isNothing)
 import System.Environment (getArgs, getProgName)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
@@ -19,6 +20,7 @@ import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Interface.Tcp as Tcp
 import qualified Reticulum.Node as Node
+import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Path as Path
 import qualified Reticulum.Request as Request
 
@@ -26,6 +28,7 @@ data Options = Options
     { forwarding :: Bool
     , listening :: Maybe String
     , called :: Maybe ByteString
+    , dialling :: Maybe ByteString
     , file :: Maybe FilePath
     , peers :: [Tcp.Peer]
     }
@@ -42,12 +45,15 @@ main = do
             | otherwise -> run chosen
 
 options :: [String] -> Either String Options
-options = go (Options False Nothing Nothing Nothing [])
+options = go (Options False Nothing Nothing Nothing Nothing [])
   where
     go chosen [] = Right chosen {peers = reverse (peers chosen)}
     go chosen ("-t" : rest) = go chosen {forwarding = True} rest
     go chosen ("-l" : port : rest) = go chosen {listening = Just port} rest
     go chosen ("-n" : name : rest) = go chosen {called = Just (C.pack name)} rest
+    go chosen ("-d" : wanted : rest) = case unhex wanted of
+        Left reason -> Left reason
+        Right bytes -> go chosen {dialling = Just bytes} rest
     go chosen ("-k" : path : rest) = go chosen {file = Just path} rest
     go _ (unknown@('-' : _) : _) = Left ("no such option: " ++ unknown)
     go chosen (address : rest) = case break (== ':') address of
@@ -60,7 +66,7 @@ usage reason = do
     stop
         ( unlines
             [ reason
-            , program ++ " [-t] [-l <port>] [-n <name>] [-k <file>] [<host>:<port> ...]"
+            , program ++ " [-t] [-l <port>] [-n <name>] [-d <hex>] [-k <file>] [<host>:<port> ...]"
             ]
         )
 
@@ -74,6 +80,7 @@ run chosen = do
     mapM_ (dialled node) (peers chosen)
     mapM_ (answering node) (listening chosen)
     mapM_ (announcing node) (called chosen)
+    mapM_ (talking node) (dialling chosen)
     forever (threadDelay (60 * 1000 * 1000))
 
 dialled :: Node.Node -> Tcp.Peer -> IO ()
@@ -123,6 +130,80 @@ announcing node name = do
             , Node.answered = \_ _ -> pure ()
             }
     counted plain = C.pack (show (B.length plain))
+
+-- | A link this node opens, and what it does on it: a packet it has
+-- proved, a request, one too long for a packet, and a resource it hands
+-- over.
+talking :: Node.Node -> ByteString -> IO ()
+talking node wanted = do
+    named <- newIORef Map.empty
+    found <- waitFor (asked node destination)
+    case found of
+        Nothing -> hPutStrLn stderr "no path to the destination to dial"
+        Just _ -> do
+            outcome <- Node.open node destination (hears named)
+            case outcome of
+                Left reason -> hPutStrLn stderr reason
+                Right link -> do
+                    putStrLn (unwords ["linked", hex link])
+                    said <- waitFor (Node.speak node link (C.pack "over the link"))
+                    remember named said "packet"
+                    _ <- Node.ask node link (C.pack "echo") (C.pack "say it back")
+                    threadDelay pause
+                    _ <- Node.ask node link (C.pack "length") (grain 4000)
+                    threadDelay pause
+                    given <- Node.hand node link (grain 3000)
+                    remember named given "resource"
+  where
+    destination = Destination.DestinationHash wanted
+    remember named held label =
+        mapM_ (\hash -> atomicModifyIORef' named (\kept -> (Map.insert hash label kept, ()))) held
+
+-- | The path is asked for again on every round, because the node the
+-- answer has to come through may not be dialled yet.
+asked :: Node.Node -> Destination.DestinationHash -> IO (Maybe (Path.Path Node.Interface))
+asked node destination = do
+    Node.requestPath node destination
+    threadDelay (1000 * 1000)
+    Map.lookup destination <$> Node.paths node
+
+hears :: IORef (Map.Map ByteString String) -> Node.Answering
+hears named =
+    Node.Answering
+        { Node.delivered = \plain -> putStrLn (unwords ["took", show plain])
+        , Node.assembled = \plain -> putStrLn (unwords ["assembled", show (B.length plain), "bytes"])
+        , Node.requested = Map.empty
+        , Node.proved = \hash -> do
+            labels <- readIORef named
+            putStrLn (unwords [fromMaybe (hex hash) (Map.lookup hash labels), "proved"])
+        , Node.answered = \_ body -> putStrLn (unwords ["answer", show body])
+        }
+
+pause :: Int
+pause = 3 * 1000 * 1000
+
+waitFor :: IO (Maybe a) -> IO (Maybe a)
+waitFor look = go (60 :: Int)
+  where
+    go 0 = pure Nothing
+    go left = do
+        found <- look
+        case found of
+            Just value -> pure (Just value)
+            Nothing -> threadDelay (500 * 1000) >> go (left - 1)
+
+-- | Bytes that do not compress, so what is sent is as long as it says.
+grain :: Int -> ByteString
+grain size = B.take size (B.concat (take (size `div` Identity.hashLength + 1) grains))
+  where
+    grains = drop 1 (iterate Identity.fullHash (C.pack "reticulum"))
+
+unhex :: String -> Either String ByteString
+unhex text = case convertFromBase Base16 (C.pack text) of
+    Left reason -> Left (text ++ ": " ++ reason)
+    Right bytes
+        | B.length bytes == Packet.addressLength -> Right bytes
+        | otherwise -> Left (text ++ ": not a destination hash")
 
 announced
     :: Destination.DestinationHash

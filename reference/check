@@ -1,12 +1,13 @@
 #!/bin/sh
 #
-# reference/check - this node between two python-rns nodes, and a third
-# that talks to the node itself.
+# reference/check - this node between two python-rns nodes, a third that
+# talks to the node itself, and a fourth the node talks to.
 #
 # Neither of the first two can reach the other except through the node
-# built here, and the third speaks to a destination the node holds. Every
-# line printed is one of them saying it got there. Needs python-rns
-# importable and takes about two and a half minutes.
+# built here, the third speaks to a destination the node holds, and the
+# fourth holds one the node opens a link to. Every line printed is one
+# of them saying it got there. Needs python-rns importable and takes
+# about three minutes.
 #
 # The corpus is what says compatible. This says the node speaks.
 
@@ -16,6 +17,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 left=42021
 right=42022
 third=42023
+fourth=42024
 announce_after=12
 
 work=$(mktemp -d)
@@ -59,16 +61,23 @@ EOF
 instance far $left
 instance near $right
 instance talk $third
+instance hold $fourth
+
+python3 "$root/reference/hold.py" "$work/hold" \
+	> "$work/hold.out" 2> "$work/hold.err" &
+running="$running $!"
 
 python3 "$root/reference/announce.py" "$work/far" "$announce_after" \
 	> "$work/far.out" 2> "$work/far.err" &
 running="$running $!"
 
 # Both sides are dialled: the far one is up, the near one is not, and
-# the node keeps knocking until it is.
-sleep 2
-"$node" -t -n haskell.check -k "$work/node.key" \
-	127.0.0.1:$left 127.0.0.1:$right 127.0.0.1:$third \
+# the node keeps knocking until it is. The one it opens a link to has
+# printed what it holds by now.
+sleep 4
+dialled=$(head -1 "$work/hold.out")
+"$node" -t -n haskell.check -d "$dialled" -k "$work/node.key" \
+	127.0.0.1:$left 127.0.0.1:$right 127.0.0.1:$third 127.0.0.1:$fourth \
 	> "$work/node.out" 2> "$work/node.err" &
 running="$running $!"
 
@@ -83,7 +92,7 @@ running="$running $!"
 python3 "$root/reference/talk.py" "$work/talk" "$serving" \
 	> "$work/talk.out" 2> "$work/talk.err" &
 running="$running $!"
-sleep 90
+sleep 110
 
 passed=0
 failed=0
@@ -110,8 +119,17 @@ says talk.out "link packet proved: True"
 says talk.out "response: b'say it back'"
 says talk.out "request as resource: b'4000'"
 says talk.out "resource concluded: True"
+says talk.out "long response: 4000"
 says node.out "took \"one packet\""
 says node.out "assembled 3000 bytes"
+says node.out "linked "
+says node.out "packet proved"
+says node.out "answer \"say it back\""
+says node.out "answer \"4000\""
+says node.out "resource proved"
+says hold.out "link established"
+says hold.out "took b'over the link'"
+says hold.out "resource concluded: 3000"
 
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]
