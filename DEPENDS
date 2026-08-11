@@ -7,6 +7,9 @@ cryptography library, and what needs each.
     network      the TCP interface's socket, and the address it is
                  dialled at
 
+    time         the node's clock: the five bytes of unix time an
+                 announce carries, and the expiry of a path
+
     memory       crypton hands back digests and keys as ByteArray, and
                  Data.ByteArray.convert is the way to a ByteString.
                  The harness reads and writes hex through

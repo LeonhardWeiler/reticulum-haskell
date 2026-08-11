@@ -25,6 +25,7 @@ library
                      Reticulum.Interface.Tcp
                      Reticulum.Link
                      Reticulum.Msgpack
+                     Reticulum.Node
                      Reticulum.Packet
                      Reticulum.Path
                      Reticulum.Proof
@@ -38,10 +39,20 @@ library
                    , crypton
                    , memory
                    , network
+                   , time
 
 executable harness
     import:         strict
     hs-source-dirs: cmd/harness
+    main-is:        Main.hs
+    build-depends:  base
+                  , bytestring
+                  , memory
+                  , reticulum
+
+executable node
+    import:         strict
+    hs-source-dirs: cmd/node
     main-is:        Main.hs
     build-depends:  base
                   , bytestring

@@ -3,6 +3,7 @@
 module Reticulum.Announce
     ( Announce (..)
     , announce
+    , emitted
     , pack
     , signedData
     , expectedHash
@@ -63,6 +64,28 @@ announce packet
     signatureAt = ratchetAt + carried Identity.ratchetSize
     needed = signatureAt + Identity.signatureLength
     carried size = if Packet.contextFlag packet then size else 0
+
+-- | The signature is over an announce that does not hold it yet.
+emitted
+    :: Identity.PrivateKey
+    -> DestinationHash
+    -> NameHash
+    -> ByteString
+    -> ByteString
+    -> Either String Announce
+emitted private destination hash random carried = do
+    key <- Identity.toPublic private
+    let unsigned =
+            Announce
+                { publicKey = key
+                , nameHash = hash
+                , randomHash = random
+                , ratchet = Nothing
+                , signature = B.empty
+                , appData = carried
+                }
+    signed <- Identity.sign private (signedData (destinationHashBytes destination) unsigned)
+    pure unsigned {signature = signed}
 
 pack :: Announce -> ByteString
 pack value =

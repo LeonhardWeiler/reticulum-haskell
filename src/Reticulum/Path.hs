@@ -60,13 +60,16 @@ data Path i = Path
 
 type Table i = Map DestinationHash (Path i)
 
-learn :: Time -> DestinationHash -> Heard i -> Table i -> Table i
+-- | Nothing where the table keeps what it had, and an announce the
+-- table keeps nothing of is one nothing above it hears about.
+learn :: Time -> DestinationHash -> Heard i -> Table i -> Maybe (Path i, Table i)
 learn now destination heard table = case Map.lookup destination table of
-    Nothing -> Map.insert destination (entry []) table
+    Nothing -> Just (taken [])
     Just old
-        | replaces now heard old -> Map.insert destination (entry (blobs old)) table
-        | otherwise -> table
+        | replaces now heard old -> Just (taken (blobs old))
+        | otherwise -> Nothing
   where
+    taken kept = (entry kept, Map.insert destination (entry kept) table)
     entry kept =
         Path
             { via = sender heard
