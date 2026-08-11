@@ -675,6 +675,7 @@ encode kind fields = case kind of
                     Resource.Proof <$> part fields "resource_hash" <*> part fields "resource_proof"
                 )
             )
+    "ifac" -> Just (masking fields)
     _ -> Nothing
   where
     echoed = mapM (written fields)
@@ -683,6 +684,22 @@ encode kind fields = case kind of
         first <- echoed echoes
         built <- packed fields =<< body
         pure (first ++ [hex built])
+
+-- | The size raw carries is the length of the code, and the frame is
+-- the one line the encoders do not simply lay end to end.
+masking :: Fields -> Either String [String]
+masking fields = do
+    name <- given fields "netname"
+    passphrase <- given fields "netkey"
+    accessed <- part fields "ifac"
+    inner <- part fields "packet"
+    held <-
+        maybe (Left "expect names neither a netname nor a netkey") Right (Interface.access name passphrase)
+    built <-
+        maybe (Left "the packet is too short to carry a header") Right $
+            Interface.pack held (Interface.Frame accessed inner)
+    echoes <- mapM (written fields) ["netname", "netkey"]
+    pure (echoes ++ [hex (B.singleton (fromIntegral (B.length accessed))), hex built])
 
 requesting :: Fields -> Either String ByteString
 requesting fields =

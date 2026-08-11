@@ -5,14 +5,16 @@ module Reticulum.Interface
     , access
     , Frame (..)
     , frame
+    , pack
     , codeFor
     , minimumSize
     ) where
 
-import Data.Bits (xor, (.&.))
+import Data.Bits (xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.Maybe (catMaybes)
+import Data.Word (Word8)
 
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
@@ -51,23 +53,45 @@ data Frame = Frame
     , packet :: ByteString
     }
 
--- | The access code keys the mask and is the one part of the frame that
--- is not masked with it.
 frame :: Access -> Int -> ByteString -> Maybe Frame
 frame held size raw
     | B.length raw <= 2 + size = Nothing
     | otherwise = Just (Frame carried recovered)
   where
     carried = B.take size (B.drop 2 raw)
-    mask = Encryption.derive (B.length raw) carried (key held)
-    unmasked =
-        B.pack
-            [ if at <= 1 || at > size + 1 then byte `xor` keyed else byte
-            | (at, byte, keyed) <- zip3 [0 :: Int ..] (B.unpack raw) (B.unpack mask)
-            ]
+    unmasked = mask held carried raw
     recovered = case B.unpack (B.take 2 unmasked) of
         [flags, hops] -> B.pack [flags .&. 0x7f, hops] <> B.drop (2 + size) unmasked
         _ -> B.empty
+
+pack :: Access -> Frame -> Maybe ByteString
+pack held value = case B.unpack (B.take 2 (packet value)) of
+    [flags, hops] -> Just (announced (mask held (code value) carried))
+      where
+        carried =
+            B.pack [flags .|. ifacFlag, hops] <> code value <> B.drop 2 (packet value)
+    _ -> Nothing
+  where
+    announced masked = case B.uncons masked of
+        Just (flags, rest) -> B.cons (flags .|. ifacFlag) rest
+        Nothing -> masked
+
+-- | The flag says the frame carries a code, and it survives the mask
+-- because it is set again after it.
+ifacFlag :: Word8
+ifacFlag = 0x80
+
+-- | The access code keys the mask and is the one run of bytes it is not
+-- applied to.
+mask :: Access -> ByteString -> ByteString -> ByteString
+mask held carried raw =
+    B.pack
+        [ if at <= 1 || at > size + 1 then byte `xor` keyed else byte
+        | (at, byte, keyed) <- zip3 [0 :: Int ..] (B.unpack raw) (B.unpack keyed')
+        ]
+  where
+    size = B.length carried
+    keyed' = Encryption.derive (B.length raw) carried (key held)
 
 codeFor :: Access -> Int -> ByteString -> Maybe ByteString
 codeFor held size message = case Identity.privateKey (key held) of
