@@ -29,18 +29,33 @@ main = do
 dump :: String -> [Maybe ByteString] -> Maybe [Field]
 dump kind blobs = case kind of
     "identity" -> Just (identity (blobs `at` 0))
+    "keyset" -> Just (keyset (blobs `at` 0))
     _ -> Nothing
 
--- | Every field of test/identity is gated on the one blob being a
--- public key. corpus doc/identity, vector format: identity.
+-- | corpus doc/identity, vector format: identity.
 identity :: Maybe ByteString -> [Field]
-identity raw =
-    gated (Identity.publicKey =<< present "public key" raw) $
-        [ ("public_key", Hex . Identity.publicKeyBytes)
-        , ("x25519_public", Hex . Identity.x25519Public)
-        , ("ed25519_public", Hex . Identity.ed25519Public)
-        , ("identity_hash", Hex . Identity.identityHashBytes . Identity.identityHash)
+identity raw = gated (Identity.publicKey =<< present "public key" raw) publicKeyFields
+
+-- | corpus doc/identity, vector format: keyset. The public half is
+-- gated a second time, on the derivation rather than on the blob.
+keyset :: Maybe ByteString -> [Field]
+keyset raw =
+    gated key
+        [ ("private_key", Hex . Identity.privateKeyBytes)
+        , ("x25519_private", Hex . Identity.x25519Private)
+        , ("ed25519_private", Hex . Identity.ed25519Private)
         ]
+        ++ gated (Identity.toPublic =<< key) publicKeyFields
+  where
+    key = Identity.privateKey =<< present "private key" raw
+
+publicKeyFields :: [(String, Identity.PublicKey -> Value)]
+publicKeyFields =
+    [ ("public_key", Hex . Identity.publicKeyBytes)
+    , ("x25519_public", Hex . Identity.x25519Public)
+    , ("ed25519_public", Hex . Identity.ed25519Public)
+    , ("identity_hash", Hex . Identity.identityHashBytes . Identity.identityHash)
+    ]
 
 -- Fields
 
