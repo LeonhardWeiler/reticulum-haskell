@@ -3,6 +3,7 @@
 module Reticulum.Announce
     ( Announce (..)
     , announce
+    , pack
     , signedData
     , expectedHash
     , destinationMatch
@@ -62,6 +63,17 @@ announce packet
     signatureAt = ratchetAt + carried Identity.ratchetSize
     needed = signatureAt + Identity.signatureLength
     carried size = if Packet.contextFlag packet then size else 0
+
+pack :: Announce -> ByteString
+pack value =
+    B.concat
+        [ Identity.publicKeyBytes (publicKey value)
+        , Destination.nameHashBytes (nameHash value)
+        , randomHash value
+        , fromMaybe B.empty (ratchet value)
+        , signature value
+        , appData value
+        ]
 
 -- | App data travels after the signature and is signed before it, and
 -- the address is signed without being in the payload at all.

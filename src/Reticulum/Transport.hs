@@ -3,13 +3,14 @@
 module Reticulum.Transport
     ( PathRequest (..)
     , pathRequest
+    , pack
     , uniqueTag
     , accepted
     ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 
 import Reticulum.Packet (Rejection (ShortPayload), addressLength)
 
@@ -33,6 +34,14 @@ pathRequest payload
     length' = B.length payload
     part at = B.take addressLength (B.drop at payload)
     request = PathRequest (part 0)
+
+pack :: PathRequest -> ByteString
+pack request =
+    B.concat
+        [ wantedHash request
+        , fromMaybe B.empty (requesterId request)
+        , fromMaybe B.empty (tag request)
+        ]
 
 uniqueTag :: PathRequest -> Maybe ByteString
 uniqueTag request = mappend (wantedHash request) . B.take addressLength <$> tag request

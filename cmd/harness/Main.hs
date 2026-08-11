@@ -649,6 +649,8 @@ encode kind fields = case kind of
     "keyset" -> Just (echoed ["private_key"])
     "destination" -> Just (echoed ["name", "identity_hash"])
     "plain" -> Just (rebuilt [] (part fields "plaintext"))
+    "announce" -> Just (rebuilt [] (announced fields))
+    "pathrequest" -> Just (rebuilt [] (asking fields))
     _ -> Nothing
   where
     echoed = mapM (written fields)
@@ -657,6 +659,40 @@ encode kind fields = case kind of
         first <- echoed echoes
         built <- packed fields =<< body
         pure (first ++ [hex built])
+
+announced :: Fields -> Either String ByteString
+announced fields = do
+    key <- Identity.publicKey =<< part fields "public_key"
+    name <- part fields "name_hash"
+    random <- part fields "random_hash"
+    turning <- given fields "ratchet"
+    signed' <- part fields "signature"
+    trailing <- part fields "app_data"
+    pure
+        ( Announce.pack
+            Announce.Announce
+                { Announce.publicKey = key
+                , Announce.nameHash = Destination.NameHash name
+                , Announce.randomHash = random
+                , Announce.ratchet = turning
+                , Announce.signature = signed'
+                , Announce.appData = trailing
+                }
+        )
+
+asking :: Fields -> Either String ByteString
+asking fields = do
+    wanted <- part fields "wanted_hash"
+    asker <- given fields "requester_id"
+    marked <- given fields "tag"
+    pure
+        ( Transport.pack
+            Transport.PathRequest
+                { Transport.wantedHash = wanted
+                , Transport.requesterId = asker
+                , Transport.tag = marked
+                }
+        )
 
 packed :: Fields -> ByteString -> Either String ByteString
 packed fields body = do
