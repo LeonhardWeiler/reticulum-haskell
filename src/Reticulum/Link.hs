@@ -11,6 +11,9 @@ module Reticulum.Link
     , signatureValid
     , Handshake (..)
     , handshake
+    , answered
+    , sealed
+    , opened
     , Identify (..)
     , identify
     , identifySigned
@@ -132,6 +135,30 @@ handshake own peer link = derived <$> Encryption.shared own peer
   where
     derived agreed =
         Handshake agreed (Token.keys (Encryption.derive Encryption.derivedKeyLength agreed link))
+
+-- | The point that goes back is this end's own ephemeral one, and the
+-- key that signs it is the destination's.
+answered
+    :: Identity.PrivateKey
+    -> ByteString
+    -> ByteString
+    -> Request
+    -> Either String (Handshake, RequestProof)
+answered secret ephemeral link asked = do
+    point <- note "the ephemeral scalar" (Encryption.publicPoint ephemeral)
+    shook <- note "the agreement" (handshake ephemeral (x25519Public asked) link)
+    key <- Identity.toPublic secret
+    let body = RequestProof B.empty point (requestSignalling asked)
+    signed <- Identity.sign secret (signedData link (Identity.ed25519Public key) body)
+    pure (shook, body {signature = signed})
+  where
+    note what = maybe (Left (what ++ " is not on the curve")) Right
+
+sealed :: Token.Keys -> ByteString -> ByteString -> Maybe ByteString
+sealed key vector plain = Token.pack <$> Token.seal key vector plain
+
+opened :: Token.Keys -> ByteString -> Maybe ByteString
+opened key body = Token.open key =<< either (const Nothing) Just (Token.token body)
 
 data Identify = Identify
     { identityPublic :: Identity.PublicKey

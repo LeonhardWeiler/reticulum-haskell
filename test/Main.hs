@@ -42,6 +42,7 @@ checks =
     , ("what is sealed for an identity opens with its key", pure sealedForAnIdentity)
     , ("a packet for a destination of this node's own is taken and proved", takenAndProved)
     , ("a packet sealed for another key is not taken", notOpened)
+    , ("a link this node answers takes what crosses it and proves it", linkAnswered)
     , ("a path response is not queued", pure notQueued)
     , ("an announce goes out twice", pure emptiedTwice)
     , ("a rebroadcast heard once is counted", pure counted)
@@ -566,6 +567,78 @@ notOpened = do
 
 spoken :: ByteString
 spoken = C.pack "one packet"
+
+overTheLink :: ByteString
+overTheLink = C.pack "over the link"
+
+onTheLink :: ByteString -> Packet.Context -> ByteString -> Packet.Packet
+onTheLink link told body =
+    (announced 0 Nothing)
+        { Packet.packetType = Packet.Data
+        , Packet.destinationType = Packet.Link
+        , Packet.address = link
+        , Packet.context = told
+        , Packet.payload = body
+        }
+
+-- | The far side of the link is a key of this test's own, and what it
+-- signs with is never the key the destination signs the proof with.
+theOtherEnd :: IO (Identity.PrivateKey, Identity.PublicKey)
+theOtherEnd = do
+    secret <- either (ioError . userError) pure (Identity.privateKey (B.replicate Identity.keySize 0x07))
+    key <- either (ioError . userError) pure (Identity.toPublic secret)
+    pure (secret, key)
+
+linkAnswered :: IO (Either String ())
+linkAnswered = do
+    (near, _, _) <- started False
+    (far, secret, emitter) <- started False
+    (_, backToNear) <- tap "one" near far
+    took <- serving far
+    key <- either (ioError . userError) pure (Identity.toPublic secret)
+    (initiator, ephemeral) <- theOtherEnd
+    let wanting =
+            (opening (addressOf emitter))
+                { Packet.payload =
+                    Identity.x25519Public ephemeral <> Identity.ed25519Public ephemeral
+                }
+        link = Link.linkId wanting
+    Node.send near wanting
+    given <- awaited backToNear ((== Packet.LinkRequestProof) . Packet.context)
+    case given >>= (either (const Nothing) Just . Link.requestProof . Packet.payload) of
+        Nothing -> pure (Left "the link request was not answered")
+        Just body -> case sealing initiator link body of
+            Nothing -> pure (Left "the handshake made no keys")
+            Just sealed -> do
+                let sent = onTheLink link Packet.None sealed
+                Node.send near sent
+                proved <- awaited backToNear delivery
+                Node.send near (onTheLink link Packet.Keepalive (B.singleton 0xff))
+                back <- awaited backToNear ((== Packet.Keepalive) . Packet.context)
+                arrived <- took
+                pure $ do
+                    require "the link proof is not signed by the destination" $
+                        Link.signatureValid link (Identity.ed25519Public key) body
+                    expect "what crossed the link" [overTheLink] arrived
+                    case proved of
+                        Nothing -> Left "no proof came back"
+                        Just proof -> do
+                            let hash = Packet.packetHash sent
+                                (carries, signed) = B.splitAt (B.length hash) (Packet.payload proof)
+                            expect "the link the proof is on" link (Packet.address proof)
+                            expect "the hash the proof carries" hash carries
+                            require "the proof is not signed by the destination" $
+                                Identity.validate key hash signed
+                    case back of
+                        Nothing -> Left "the keepalive was not answered"
+                        Just awake -> expect "what came back" (B.singleton 0xfe) (Packet.payload awake)
+  where
+    delivery packet =
+        Packet.packetType packet == Packet.Proof && Packet.context packet == Packet.None
+    sealing initiator link body = do
+        shook <-
+            Link.handshake (Identity.x25519Private initiator) (Link.responderPublic body) link
+        Link.sealed (Link.keys shook) vector overTheLink
 
 throughTheMiddle :: IO (Either String ())
 throughTheMiddle = do

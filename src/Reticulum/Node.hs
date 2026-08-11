@@ -47,6 +47,7 @@ import qualified Reticulum.Link as Link
 import Reticulum.Packet (Packet (Packet))
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Path as Path
+import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
 -- | Two interfaces of the same name are two of them, so what tells them
@@ -78,6 +79,16 @@ data Local = Local
     , answers :: Answering
     }
 
+-- | A link this node answered: the keys the handshake made, the one
+-- interface it is allowed to arrive on, and who the far end said it is.
+data Session = Session
+    { keys :: Token.Keys
+    , at :: Interface
+    , since :: Path.Time
+    , serving :: Local
+    , identified :: Maybe Identity.PublicKey
+    }
+
 data Node = Node
     { identity :: Identity.PrivateKey
     , public :: Identity.PublicKey
@@ -91,6 +102,7 @@ data Node = Node
     , announces :: MVar (Map DestinationHash Packet)
     , seen :: MVar (Set ByteString)
     , local :: MVar (Map DestinationHash Local)
+    , sessions :: MVar (Map ByteString Session)
     , requests :: MVar (Set ByteString)
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
     , sweeper :: Maybe ThreadId
@@ -114,13 +126,11 @@ start how private handler = case Identity.toPublic private of
                 <*> newMVar Map.empty
                 <*> newMVar Set.empty
                 <*> newMVar Map.empty
+                <*> newMVar Map.empty
                 <*> newMVar Set.empty
         let built = node handler Nothing
-        if transport how
-            then do
-                thread <- forkIO (forever (threadDelay sweepInterval >> sweep built))
-                pure (Right built {sweeper = Just thread})
-            else pure (Right built)
+        thread <- forkIO (forever (threadDelay sweepInterval >> sweep built))
+        pure (Right built {sweeper = Just thread})
 
 stop :: Node -> IO ()
 stop = maybe (pure ()) killThread . sweeper
@@ -165,13 +175,17 @@ sorted node through packet
     | Packet.address packet == Transport.pathRequestAddress = asked node through packet
     | otherwise = do
         mine <- readMVar (local node)
+        open <- readMVar (sessions node)
         case Map.lookup (DestinationHash (Packet.address packet)) mine of
             Just held -> arrived node through held packet
-            Nothing -> forwarding node (relay node through packet)
+            Nothing -> case Map.lookup (Packet.address packet) open of
+                Just session -> spoken node through session packet
+                Nothing -> forwarding node (relay node through packet)
 
 -- | A packet for a destination of this node's own goes no further.
 arrived :: Node -> Interface -> Local -> Packet -> IO ()
 arrived node through held packet
+    | Packet.packetType packet == Packet.LinkRequest = opening node through held packet
     | Packet.packetType packet /= Packet.Data = pure ()
     | Packet.destinationType packet /= Packet.Single = pure ()
     | otherwise = case unsealed node (Packet.payload packet) of
@@ -179,6 +193,98 @@ arrived node through held packet
         Just plain -> do
             delivered (answers held) plain
             prove node through packet
+
+-- | Only the one mode this end derives keys for is answered.
+opening :: Node -> Interface -> Local -> Packet -> IO ()
+opening node through held packet = case Link.request (Packet.payload packet) of
+    Left _ -> pure ()
+    Right wanted
+        | Link.mode (Link.requestSignalling wanted) /= Link.modeAes256Cbc -> pure ()
+        | otherwise -> do
+            ephemeral <- Entropy.getEntropy Encryption.ephemeralLength
+            now <- clock
+            case Link.answered (identity node) ephemeral link wanted of
+                Left reason -> hPutStrLn stderr ("link: " ++ reason)
+                Right (shook, body) -> do
+                    modifyMVar_ (sessions node) (pure . Map.insert link (begun shook now))
+                    transmit through (Packet.pack (written body))
+  where
+    link = Link.linkId packet
+    begun shook now =
+        Session
+            { keys = Link.keys shook
+            , at = through
+            , since = now
+            , serving = held
+            , identified = Nothing
+            }
+    written body =
+        onLink link Packet.Proof Packet.LinkRequestProof (Link.packRequestProof body)
+
+onLink :: ByteString -> Packet.PacketType -> Packet.Context -> ByteString -> Packet
+onLink link kind told body =
+    Packet
+        { Packet.contextFlag = False
+        , Packet.transportType = Packet.Broadcast
+        , Packet.destinationType = Packet.Link
+        , Packet.packetType = kind
+        , Packet.hops = 0
+        , Packet.transportId = Nothing
+        , Packet.address = link
+        , Packet.context = told
+        , Packet.payload = body
+        }
+
+-- | A link packet that arrives on another interface than the one the
+-- link was answered on is not on that link.
+spoken :: Node -> Interface -> Session -> Packet -> IO ()
+spoken node through session packet
+    | through /= at session = pure ()
+    | Packet.packetType packet /= Packet.Data = pure ()
+    | otherwise = do
+        now <- clock
+        modifyMVar_ (sessions node) (pure . Map.adjust (\held -> held {since = now}) link)
+        case Packet.context packet of
+            Packet.Keepalive -> when (Packet.payload packet == B.singleton alive) answering
+            Packet.None -> mapM_ took (opened (Packet.payload packet))
+            Packet.LinkIdentify -> mapM_ names (opened (Packet.payload packet))
+            Packet.LinkClose -> mapM_ closes (opened (Packet.payload packet))
+            _ -> pure ()
+  where
+    link = Packet.address packet
+    opened = Link.opened (keys session)
+    answering = transmit through (Packet.pack (onLink link Packet.Data Packet.Keepalive awake))
+    took plain = do
+        delivered (answers (serving session)) plain
+        proveOnLink node session packet
+    names plain = case Link.identify plain of
+        Just who
+            | Link.identifyValid link who ->
+                modifyMVar_
+                    (sessions node)
+                    (pure . Map.adjust (\held -> held {identified = Just (Link.identityPublic who)}) link)
+        _ -> pure ()
+    closes plain = when (plain == link) (modifyMVar_ (sessions node) (pure . Map.delete link))
+
+-- | The one packet on a link that carries no token, and the two bytes
+-- that are the whole exchange.
+alive :: Word8
+alive = 0xff
+
+awake :: ByteString
+awake = B.singleton 0xfe
+
+-- | A proof on a link carries the hash it proves, which one from a
+-- destination does not.
+proveOnLink :: Node -> Session -> Packet -> IO ()
+proveOnLink node session packet = case Identity.sign (identity node) hash of
+    Left reason -> hPutStrLn stderr ("proof: " ++ reason)
+    Right signed ->
+        transmit
+            (at session)
+            (Packet.pack (onLink (Packet.address packet) Packet.Proof Packet.None (hash <> signed)))
+  where
+    hash = Packet.packetHash packet
 
 unsealed :: Node -> ByteString -> Maybe ByteString
 unsealed node body = do
@@ -319,6 +425,17 @@ sweep node = do
     mapM_ (rebroadcast node) sending
     modifyMVar_ (returns node) (pure . Transport.forgotten now interfaces)
     modifyMVar_ (links node) (pure . Transport.aged now interfaces)
+    modifyMVar_ (sessions node) (pure . Map.filter (open now interfaces))
+  where
+    open now interfaces session =
+        Path.seconds (since session) + staleTime > Path.seconds now
+            && at session `elem` interfaces
+
+keepalive :: Double
+keepalive = 360
+
+staleTime :: Double
+staleTime = 2 * keepalive
 
 swapped :: (a, b) -> (b, a)
 swapped (one, other) = (other, one)
