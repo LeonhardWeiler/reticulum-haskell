@@ -61,8 +61,9 @@ in the corpus is the contract. Three of its rules bind this repository:
 `cmd/check` exits 2 when it measured nothing, and a pipeline needs
 `pipefail` or the verdict comes from `tee`.
 
-`ENCODE=no` is where a kind starts, not where it ends: a node writes
-packets.
+Both directions are measured. A decoder gets its encoder in the module
+that holds it, and the keys are not in that direction: a token whose
+hmac was altered is still a token.
 
 A test here that duplicates a vector is deleted. What belongs here is
 what the corpus cannot hold: properties, and the layers above link.
@@ -208,13 +209,12 @@ checkout is not committed.
 
 # Open
 
-Every kind the corpus holds passes in the decode direction. What is
-open is which of the two comes next:
+Every kind the corpus holds passes, in both directions. What the
+corpus cannot measure is what is left:
 
-    the encode direction   harness -e, and ENCODE out of check
     the node               paths, hops, tables, sockets
 
-And the questions that were open before either:
+And the questions that were open before it:
 
     Which interface comes first.
     Whether harness lives here or in the corpus under conformance/.

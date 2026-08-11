@@ -9,9 +9,6 @@
 # result must carry. A count against another corpus is another number,
 # and the fingerprint is the only thing that says which one it is; see
 # the corpus's doc/harness, "In your CI".
-#
-# ENCODE is no because the harness has no encode direction yet. It is
-# not a knob: when a kind can write packets, this line changes.
 
 set -e
 
@@ -49,7 +46,7 @@ ln -sf "$(cabal list-bin --verbose=0 exe:harness)" harness
 # pipeline is the status of its last command, and the verdict would
 # come from the reader.
 status=0
-result=$(DUMP=$root/harness ENCODE=no "$corpus/cmd/check") || status=$?
+result=$(DUMP=$root/harness "$corpus/cmd/check") || status=$?
 echo "$result"
 
 measured=$(printf '%s\n' "$result" | sed -n 's/.*corpus \([0-9][0-9]*\).*/\1/p')

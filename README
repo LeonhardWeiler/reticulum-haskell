@@ -12,7 +12,8 @@ Where it stands
 
     104 passed, 0 failed, corpus 72746484
 
-Every kind the corpus holds, in the decode direction.
+Every kind the corpus holds, and the round trip behind the 88 vectors
+whose expect holds every byte of raw.
 
 
 Build
@@ -61,12 +62,18 @@ The harness
 
 One program taking the arguments the corpus's cmd/dump takes:
 
-    ./harness <kind> <rawfile>
+    ./harness <kind> <rawfile>       fields out
+    ./harness -e <kind> <expectfile> raw back
 
 It prints one field per line from this implementation's own code. A
 field this implementation does not compute is a dash; the harness
 never computes one on the library's behalf. A kind not implemented
 exits 77. The contract is the corpus's doc/harness.
+
+Going the other way, the fields are read back into the library's own
+types and the library writes the bytes. The keys never enter into it:
+a token whose hmac was altered is still a token, which is why such a
+vector can be rebuilt at all.
 
 
 Tests

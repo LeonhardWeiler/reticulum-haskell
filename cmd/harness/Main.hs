@@ -676,6 +676,10 @@ encode kind fields = case kind of
                 )
             )
     "ifac" -> Just (masking fields)
+    -- Raw holds the message, and expect records only its length and its
+    -- hash.
+    "signature" -> Just (Left "the kind is not of the encode class")
+    "sign" -> Just (Left "the kind is not of the encode class")
     _ -> Nothing
   where
     echoed = mapM (written fields)
