@@ -209,13 +209,16 @@ checkout is not committed.
 
 # Open
 
-Every kind the corpus holds passes, in both directions. What the
+Every kind the corpus holds passes, in both directions, and a node on
+one TCP interface hears the reference and is heard by it. What the
 corpus cannot measure is what is left:
 
-    the node               paths, hops, tables, sockets
+    the transport node     forwarding, the announce table, path
+                           requests, more than one interface
+    the layers above       what a node does with a packet that is not
+                           an announce
 
 And the questions that were open before it:
 
-    Which interface comes first.
     Whether harness lives here or in the corpus under conformance/.
     Whether tests that start the reference belong here at all.

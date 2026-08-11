@@ -52,6 +52,7 @@ Layout
 
     src/Reticulum/     the library: the codec is pure, the node is IO
     cmd/harness/       the corpus harness, linked to ./harness by check
+    cmd/node/          a node on one TCP interface
     .github/workflows/ one job, and it runs ./check
     CLAUDE.md          the rules this repository is written under
     CORPUS             the pin
@@ -75,6 +76,22 @@ Going the other way, the fields are read back into the library's own
 types and the library writes the bytes. The keys never enter into it:
 a token whose hmac was altered is still a token, which is why such a
 vector can be rebuilt at all.
+
+
+The node
+
+    node <host> <port> [<destination name> [<identity file>]]
+
+Dials one TCP peer, and prints a line for every announce it takes into
+its path table: the destination, the hops it is away, the interface it
+came on, and the app data. Given a name it announces that destination
+once, under the identity in the file, which is written if it is not
+there. Log lines go to standard error.
+
+The path table is what an announce leaves behind. A shorter path is
+taken only when it was emitted later than the one on file, and an
+announce the table keeps nothing of is one nothing above it hears
+about.
 
 
 Tests
