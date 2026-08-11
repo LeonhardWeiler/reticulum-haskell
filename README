@@ -150,7 +150,8 @@ the rules the tables follow, the token in the direction that encrypts,
 and nodes wired to each other in memory, one carrying what another
 announced, opening a link across it, proving what crossed, answering a
 link, a request and a resource of its own, and opening a link of its
-own to send a request and hand a resource over.
+own to send a request, hand a resource over, hand over one longer than
+a segment, and close the link from either end.
 
     ./reference/check
 

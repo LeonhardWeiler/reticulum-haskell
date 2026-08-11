@@ -213,10 +213,13 @@ Every kind the corpus holds passes, in both directions. A transport
 node carries what two reference nodes say to each other, and both ends
 of a link are this node's own: the one it answers and the one it opens.
 On either it proves a packet, serves or sends a request, takes or hands
-over a resource, and answers with a resource what one packet cannot
-hold. What is left is what one exchange does not reach:
+over a resource, answers with a resource what one packet cannot hold,
+hands over one longer than a segment, keeps the link while it is used
+and closes it when it is done. What is left is what no exchange here
+reaches:
 
-    the link over time     the keepalive an initiator sends, and the
-                           close either end writes
-    the long resource      one past the segment a single advertisement
-                           can name
+    the identify           the one this node takes on a link, and the
+                           one it has never written
+    the channel            the envelope, and nothing over it
+    the interface          one socket, and every other kind of link
+                           between two nodes
