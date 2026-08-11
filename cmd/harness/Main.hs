@@ -35,10 +35,15 @@ main = do
                 Nothing -> exitWith (ExitFailure 77)
                 Just (Left reason) -> die (path ++ ": " ++ reason)
                 Just (Right fields) -> mapM_ (putStrLn . render) fields
-        ("-e" : _) -> die "the encode direction is not implemented"
+        ["-e", kind, path] -> do
+            fields <- readFields path
+            case encode kind fields of
+                Nothing -> exitWith (ExitFailure 77)
+                Just (Left reason) -> die (path ++ ": " ++ reason)
+                Just (Right raw) -> mapM_ putStrLn raw
         _ -> do
             name <- getProgName
-            die ("usage: " ++ name ++ " <kind> <rawfile>")
+            die ("usage: " ++ name ++ " <kind> <rawfile>\n       " ++ name ++ " -e <kind> <expectfile>")
 
 -- | Nothing for a kind this harness has not implemented, Left for a raw
 -- that does not carry what the kind holds.
@@ -605,7 +610,10 @@ render (name, value) = name ++ replicate (nameColumns - length name) ' ' ++ " " 
     text (Keyword word) = word
     text (Hex bytes)
         | B.null bytes = "-"
-        | otherwise = C.unpack (Encoding.convertToBase Encoding.Base16 bytes)
+        | otherwise = hex bytes
+
+hex :: ByteString -> String
+hex = C.unpack . Encoding.convertToBase Encoding.Base16
 
 byte :: Word8 -> Value
 byte = Hex . B.singleton
@@ -629,3 +637,137 @@ at :: [Maybe ByteString] -> Int -> Maybe ByteString
 at blobs index = case drop index blobs of
     (blob : _) -> blob
     [] -> Nothing
+
+-- | Writing raw back from the fields. The table this runs from is its
+-- own, and the round trip is what holds it to the one the decoders
+-- read.
+type Fields = [(String, String)]
+
+encode :: String -> Fields -> Maybe (Either String [String])
+encode kind fields = case kind of
+    "identity" -> Just (echoed ["public_key"])
+    "keyset" -> Just (echoed ["private_key"])
+    "destination" -> Just (echoed ["name", "identity_hash"])
+    "plain" -> Just (rebuilt [] (part fields "plaintext"))
+    _ -> Nothing
+  where
+    echoed = mapM (written fields)
+
+    rebuilt echoes body = do
+        first <- echoed echoes
+        built <- packed fields =<< body
+        pure (first ++ [hex built])
+
+packed :: Fields -> ByteString -> Either String ByteString
+packed fields body = do
+    flagged <- keyword fields "context_flag" [("set", True), ("unset", False)]
+    transport <-
+        keyword
+            fields
+            "transport_type"
+            [("broadcast", Packet.Broadcast), ("transport", Packet.Transport)]
+    toward <-
+        keyword
+            fields
+            "destination_type"
+            [ ("single", Packet.Single)
+            , ("group", Packet.Group)
+            , ("plain", Packet.Plain)
+            , ("link", Packet.Link)
+            ]
+    kind <-
+        keyword
+            fields
+            "packet_type"
+            [ ("data", Packet.Data)
+            , ("announce", Packet.Announce)
+            , ("linkrequest", Packet.LinkRequest)
+            , ("proof", Packet.Proof)
+            ]
+    count <- decimal fields "hops"
+    relay <- given fields "transport_id"
+    hashed <- part fields "destination_hash"
+    named <- contextOf fields
+    pure
+        ( Packet.pack
+            Packet.Packet
+                { Packet.contextFlag = flagged
+                , Packet.transportType = transport
+                , Packet.destinationType = toward
+                , Packet.packetType = kind
+                , Packet.hops = fromIntegral count
+                , Packet.transportId = relay
+                , Packet.address = hashed
+                , Packet.context = named
+                , Packet.payload = body
+                }
+        )
+
+contextOf :: Fields -> Either String Packet.Context
+contextOf fields = do
+    value <- written fields "context"
+    case lookup value names of
+        Just found -> Right found
+        Nothing -> case B.unpack <$> unhex "context" value of
+            Right [single] -> Right (Packet.toContext single)
+            _ -> Left ("unusable context " ++ value)
+  where
+    names =
+        [ ("none", Packet.None)
+        , ("resource", Packet.Resource)
+        , ("resource_adv", Packet.ResourceAdv)
+        , ("resource_req", Packet.ResourceReq)
+        , ("resource_hmu", Packet.ResourceHmu)
+        , ("resource_prf", Packet.ResourcePrf)
+        , ("resource_icl", Packet.ResourceIcl)
+        , ("resource_rcl", Packet.ResourceRcl)
+        , ("request", Packet.Request)
+        , ("response", Packet.Response)
+        , ("path_response", Packet.PathResponse)
+        , ("channel", Packet.Channel)
+        , ("keepalive", Packet.Keepalive)
+        , ("link_identify", Packet.LinkIdentify)
+        , ("link_close", Packet.LinkClose)
+        , ("link_proof", Packet.LinkProof)
+        , ("link_rtt", Packet.LinkRtt)
+        , ("link_request_proof", Packet.LinkRequestProof)
+        ]
+
+written :: Fields -> String -> Either String String
+written fields name = maybe (Left ("expect carries no " ++ name)) Right (lookup name fields)
+
+-- | A dash carries no bytes, which is how the field format spells every
+-- optional part of a payload.
+part :: Fields -> String -> Either String ByteString
+part fields name = maybe B.empty id <$> given fields name
+
+given :: Fields -> String -> Either String (Maybe ByteString)
+given fields name = do
+    value <- written fields name
+    if value == "-"
+        then Right Nothing
+        else Just <$> unhex name value
+
+unhex :: String -> String -> Either String ByteString
+unhex name value = case Encoding.convertFromBase Encoding.Base16 (C.pack value) of
+    Left reason -> Left (name ++ ": " ++ reason)
+    Right bytes -> Right bytes
+
+keyword :: Fields -> String -> [(String, a)] -> Either String a
+keyword fields name table = do
+    value <- written fields name
+    maybe (Left ("unusable " ++ name ++ " " ++ value)) Right (lookup value table)
+
+decimal :: Fields -> String -> Either String Int
+decimal fields name = do
+    value <- written fields name
+    case reads value of
+        [(read', "")] -> Right read'
+        _ -> Left ("unusable " ++ name ++ " " ++ value)
+
+readFields :: FilePath -> IO Fields
+readFields path = map field . C.lines <$> B.readFile path
+  where
+    field line = case C.words line of
+        (name : rest) -> (C.unpack name, unwords (map C.unpack rest))
+        [] -> ("", "")
