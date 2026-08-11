@@ -30,3 +30,7 @@ jobs:
         run: |
           set -o pipefail
           nix develop --command ./check | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # What the corpus cannot hold: the node above one packet.
+      - name: Test
+        run: nix develop --command cabal test --test-show-details=direct

@@ -53,6 +53,7 @@ Layout
     src/Reticulum/     the library: the codec is pure, the node is IO
     cmd/harness/       the corpus harness, linked to ./harness by check
     cmd/node/          a node on one TCP interface
+    test/              what the corpus cannot hold
     .github/workflows/ one job, and it runs ./check
     CLAUDE.md          the rules this repository is written under
     CORPUS             the pin
@@ -99,8 +100,13 @@ about.
 
 Tests
 
+    cabal test
+
 There are none here that a vector already proves. What belongs here is
 what the corpus cannot hold: properties, and the layers above link.
+Today that is the transport node: the rules the announce table follows,
+and nodes wired to each other in memory, one carrying what another
+announced.
 
 
 License
