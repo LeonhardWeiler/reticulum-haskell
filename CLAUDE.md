@@ -208,6 +208,14 @@ checkout is not committed.
 
 # Open
 
+Every kind the corpus holds passes in the decode direction. What is
+open is which of the two comes next:
+
+    the encode direction   harness -e, and ENCODE out of check
+    the node               paths, hops, tables, sockets
+
+And the questions that were open before either:
+
     Which interface comes first.
     Whether harness lives here or in the corpus under conformance/.
     Whether tests that start the reference belong here at all.
