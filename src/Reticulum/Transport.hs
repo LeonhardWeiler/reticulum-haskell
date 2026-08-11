@@ -11,18 +11,28 @@ module Reticulum.Transport
     , remembered
     , Route (..)
     , outbound
+    , Pending (..)
+    , Waiting
+    , queued
+    , due
+    , rebroadcast
+    , overheard
+    , window
     ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Word (Word8)
 
 import Reticulum.Destination (DestinationHash (DestinationHash))
 import Reticulum.Packet (Packet, Rejection (ShortPayload), addressLength)
 import qualified Reticulum.Packet as Packet
+import Reticulum.Path (Time (Time, seconds))
 import qualified Reticulum.Path as Path
 
 data PathRequest = PathRequest
@@ -124,3 +134,89 @@ outbound table packet
             { Packet.transportId = Just (Path.via path)
             , Packet.transportType = Packet.Transport
             }
+
+retransmits :: Int
+retransmits = 1
+
+grace :: Double
+grace = 5
+
+-- | The wait before a rebroadcast is spread across this many seconds so
+-- that two nodes hearing one announce do not answer together.
+window :: Double
+window = 0.5
+
+localRebroadcasts :: Int
+localRebroadcasts = 2
+
+data Pending i = Pending
+    { announce :: Packet
+    , sendAt :: Time
+    , retries :: Int
+    , rebroadcasts :: Int
+    , blocked :: Bool
+    , travelled :: Word8
+    , arrived :: i
+    , toward :: Maybe i
+    }
+
+type Waiting i = Map DestinationHash (Pending i)
+
+-- | A path response answers one request and is not carried further.
+queued :: Time -> Double -> i -> Packet -> Maybe (Pending i)
+queued now spread through packet
+    | Packet.context packet == Packet.PathResponse = Nothing
+    | otherwise =
+        Just
+            Pending
+                { announce = packet
+                , sendAt = later now spread
+                , retries = 0
+                , rebroadcasts = 0
+                , blocked = False
+                , travelled = Packet.hops packet
+                , arrived = through
+                , toward = Nothing
+                }
+
+due :: Time -> Waiting i -> ([Pending i], Waiting i)
+due now = Map.foldrWithKey step ([], Map.empty)
+  where
+    step destination entry (sending, kept)
+        | retries entry > retransmits = (sending, kept)
+        | sendAt entry > now = (sending, Map.insert destination entry kept)
+        | otherwise = (entry : sending, Map.insert destination (again entry) kept)
+    again entry =
+        entry {sendAt = later now (grace + window), retries = retries entry + 1}
+
+rebroadcast :: ByteString -> Pending i -> Packet
+rebroadcast ours entry =
+    (announce entry)
+        { Packet.transportType = Packet.Transport
+        , Packet.transportId = Just ours
+        , Packet.hops = travelled entry
+        , Packet.context = if blocked entry then Packet.PathResponse else Packet.None
+        }
+
+-- | One hop further along is another node doing what this one was going
+-- to do, and two is that node's own rebroadcast coming back.
+overheard :: Time -> Packet -> Waiting i -> Waiting i
+overheard now packet waiting
+    | isJust (Packet.transportId packet) = Map.update kept destination waiting
+    | otherwise = waiting
+  where
+    destination = DestinationHash (Packet.address packet)
+    kept entry
+        | Packet.hops packet == travelled entry + 2
+        , retries entry > 0
+        , now < sendAt entry =
+            Nothing
+        | Packet.hops packet == travelled entry + 1 =
+            if retries entry > 0 && grown entry >= localRebroadcasts
+                then Nothing
+                else Just entry {rebroadcasts = grown entry}
+        | otherwise = Just entry
+    grown entry = rebroadcasts entry + 1
+
+later :: Time -> Double -> Time
+later now offset = Time (seconds now + offset)
