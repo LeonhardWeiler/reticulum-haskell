@@ -1,0 +1,87 @@
+Reticulum in Haskell
+
+A Reticulum node: wire format, identity and link cryptography,
+destinations, transport, resources, interfaces.
+
+Compatible means identical to python-rns 1.4.2 at commit b48b96e6,
+openssl backend. The corpus in CORPUS is what says so, and the count
+below is the whole claim.
+
+
+Where it stands
+
+    5 passed, 0 failed, corpus 72746484, 99 skipped
+
+identity. The kinds not implemented are skipped and named on that
+line; see the corpus's doc/harness, rule 3.
+
+
+Build
+
+Nix is the only thing that has to be installed.
+
+    nix develop
+    cabal build
+    ./check
+
+The shell carries the compiler, cabal, and the C compiler and POSIX
+tools the corpus builds itself with. flake.nix names the compiler and
+flake.lock pins the package set.
+
+
+check
+
+    ./check                                 clone the pin and measure
+    CORPUS_DIR=../reticulum-vectors ./check use that checkout as it is
+
+CORPUS holds two lines and is the only place they are written:
+
+    commit        the corpus commit to measure against
+    fingerprint   the corpus number printed on the result line
+
+A count is a count against one corpus. The fingerprint says which one,
+so check refuses a result that carries another.
+
+    exit 0    every vector that was not skipped passed
+    exit 1    a vector failed
+    exit 2    nothing was measured, or the fingerprint is not the one
+              on file
+
+
+Layout
+
+    src/Reticulum/     the library: the codec is pure, the node is IO
+    cmd/harness/       the corpus harness, linked to ./harness by check
+    CLAUDE.md          the rules this repository is written under
+    CORPUS             the pin
+    DEPENDS            every dependency past base and the crypto library,
+                       and what needs it
+
+The library names the reference by symbol, never by line number:
+
+    Reticulum.Identity    RNS/Identity.py
+                          RNS/Identity.py#truncated_hash
+
+
+The harness
+
+One program taking the arguments the corpus's cmd/dump takes:
+
+    ./harness <kind> <rawfile>
+
+It prints one field per line from this implementation's own code. A
+field this implementation does not compute is a dash; the harness
+never computes one on the library's behalf. A kind not implemented
+exits 77. The contract is the corpus's doc/harness.
+
+
+Tests
+
+There are none here that a vector already proves. What belongs here is
+what the corpus cannot hold: properties, and the layers above link.
+
+
+License
+
+LICENSE, and its two restrictions. Copying upstream code or
+documentation text requires attribution.

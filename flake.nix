@@ -11,6 +11,10 @@
       compiler = "ghc984";
     in
     {
+      packages = forEach (pkgs: {
+        default = pkgs.haskell.packages.${compiler}.callCabal2nix "reticulum" ./. { };
+      });
+
       devShells = forEach (pkgs:
         let
           hp = pkgs.haskell.packages.${compiler};

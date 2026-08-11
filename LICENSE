@@ -3,7 +3,7 @@ Reticulum License
 Copyright (c) 2016-2026 Mark Qvist
 Copyright (c) 2026 Leonhard Weiler
 
-This corpus is derived from the Reticulum reference implementation and
+This implementation follows the Reticulum reference implementation and
 is released under the same terms.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

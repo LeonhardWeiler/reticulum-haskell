@@ -1,0 +1,61 @@
+#!/bin/sh
+#
+# check - run the corpus against this implementation's harness.
+#
+#	./check					clone the pin and measure
+#	CORPUS_DIR=../reticulum-vectors ./check	use that checkout as it stands
+#
+# CORPUS names the commit to measure against and the fingerprint the
+# result must carry. A count against another corpus is another number,
+# and the fingerprint is the only thing that says which one it is; see
+# the corpus's doc/harness, "In your CI".
+#
+# ENCODE is no because the harness has no encode direction yet. It is
+# not a knob: when a kind can write packets, this line changes.
+
+set -e
+
+root=$(cd "$(dirname "$0")" && pwd)
+cd "$root"
+
+url=https://github.com/LeonhardWeiler/reticulum-vectors
+
+field() { sed -n "s/^$1  *//p" CORPUS; }
+
+commit=$(field commit)
+fingerprint=$(field fingerprint)
+if [ -z "$commit" ] || [ -z "$fingerprint" ]; then
+	echo "CORPUS names no commit and fingerprint" >&2
+	exit 2
+fi
+
+if [ -n "$CORPUS_DIR" ]; then
+	corpus=$(cd "$CORPUS_DIR" && pwd)
+else
+	corpus=$root/.corpus
+	[ -d "$corpus/.git" ] || git clone --quiet "$url" "$corpus"
+	if [ "$(git -C "$corpus" rev-parse HEAD)" != "$commit" ]; then
+		git -C "$corpus" fetch --quiet origin "$commit" ||
+			git -C "$corpus" fetch --quiet origin
+		git -C "$corpus" checkout --quiet --detach "$commit"
+	fi
+fi
+
+make -C "$corpus" >&2
+cabal build --verbose=0 exe:harness >&2
+ln -sf "$(cabal list-bin --verbose=0 exe:harness)" harness
+
+# The result is captured rather than piped: the exit status of a
+# pipeline is the status of its last command, and the verdict would
+# come from the reader.
+status=0
+result=$(DUMP=$root/harness ENCODE=no "$corpus/cmd/check") || status=$?
+echo "$result"
+
+measured=$(printf '%s\n' "$result" | sed -n 's/.*corpus \([0-9][0-9]*\).*/\1/p')
+if [ "$measured" != "$fingerprint" ]; then
+	echo "corpus $measured is not the $fingerprint in CORPUS" >&2
+	exit 2
+fi
+
+exit "$status"

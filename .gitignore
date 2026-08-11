@@ -7,4 +7,7 @@ result
 result-*
 
 .corpus/
-harness
+
+# The built harness, linked to the root by check. Anchored: the
+# executable's source is cmd/harness.
+/harness

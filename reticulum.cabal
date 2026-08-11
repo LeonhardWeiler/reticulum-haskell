@@ -1,0 +1,31 @@
+cabal-version:   3.0
+name:            reticulum
+version:         0.1.0
+synopsis:        A Reticulum node
+author:          Leonhard Weiler
+license:         LicenseRef-Reticulum
+license-file:    LICENSE
+build-type:      Simple
+extra-doc-files: README, CLAUDE.md, CORPUS, DEPENDS
+
+common strict
+    default-language: Haskell2010
+    ghc-options:      -Wall -Werror -Wincomplete-uni-patterns
+
+library
+    import:          strict
+    hs-source-dirs:  src
+    exposed-modules: Reticulum.Identity
+    build-depends:   base        >=4.17 && <5
+                   , bytestring
+                   , crypton
+                   , memory
+
+executable harness
+    import:         strict
+    hs-source-dirs: cmd/harness
+    main-is:        Main.hs
+    build-depends:  base
+                  , bytestring
+                  , memory
+                  , reticulum

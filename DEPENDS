@@ -1,0 +1,10 @@
+Dependencies beyond base, bytestring, containers and the one
+cryptography library, and what needs each.
+
+    crypton      the cryptography library: SHA-256, Ed25519, X25519,
+                 AES-256-CBC, HMAC-SHA-256
+
+    memory       crypton hands back digests and keys as ByteArray, and
+                 Data.ByteArray.convert is the way to a ByteString.
+                 The harness reads and writes hex through
+                 Data.ByteArray.Encoding.
