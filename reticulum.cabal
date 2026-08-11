@@ -17,6 +17,8 @@ library
     hs-source-dirs:  src
     exposed-modules: Reticulum.Destination
                      Reticulum.Identity
+                     Reticulum.Packet
+                     Reticulum.Transport
     build-depends:   base        >=4.17 && <5
                    , bytestring
                    , crypton

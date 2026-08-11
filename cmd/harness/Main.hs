@@ -6,11 +6,14 @@ import qualified Data.ByteArray.Encoding as Encoding
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
+import Data.Word (Word8)
 import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (ExitFailure), die, exitWith)
 
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
+import qualified Reticulum.Packet as Packet
+import qualified Reticulum.Transport as Transport
 
 main :: IO ()
 main = do
@@ -36,6 +39,8 @@ dump kind blobs = case kind of
     "identity" -> Just (identity <$> blob 0 "public key")
     "keyset" -> Just (keyset <$> blob 0 "private key")
     "destination" -> Just (destination <$> blob 0 "name" <*> pure (blobs `at` 1))
+    "plain" -> Just (plain <$> blob 0 "packet")
+    "pathrequest" -> Just (pathrequest <$> blob 0 "packet")
     _ -> Nothing
   where
     blob index what = maybe (Left ("raw carries no " ++ what)) Right (blobs `at` index)
@@ -84,13 +89,128 @@ destination rawName rawIdentity =
     holder = Identity.IdentityHash <$> rawIdentity
     address = Destination.destinationHash hash holder
 
+-- | corpus doc/packet, section Plain destinations. The payload is the
+-- data: encryption to a plain destination returns the plaintext
+-- unchanged, so there is nothing between the two fields and the packet.
+plain :: ByteString -> [Field]
+plain raw = packet raw $ \unpacked ->
+    Right
+        [ ("plaintext_length", Dec (B.length (Packet.payload unpacked)))
+        , ("plaintext", Hex (Packet.payload unpacked))
+        ]
+
+-- | corpus doc/packet, section Path requests.
+pathrequest :: ByteString -> [Field]
+pathrequest raw = packet raw $ \unpacked ->
+    fields <$> Transport.pathRequest (Packet.payload unpacked)
+  where
+    fields request =
+        [ ("wanted_hash", Hex (Transport.wantedHash request))
+        , ("requester_id", maybe Absent Hex (Transport.requesterId request))
+        , ("tag", maybe Absent Hex (Transport.tag request))
+        , ("unique_tag", maybe Absent Hex (Transport.uniqueTag request))
+        , ("accepted", verdict (Transport.accepted request))
+        ]
+
+-- | A packet that broke a rule carries the rule and nothing else, and a
+-- payload that broke one leaves no header standing either: these rules
+-- all say the packet was not read.
+packet :: ByteString -> (Packet.Packet -> Either Packet.Rejection [Field]) -> [Field]
+packet raw fields = case Packet.unpack raw of
+    Left reason -> rejection reason
+    Right unpacked -> case fields unpacked of
+        Left reason -> rejection reason
+        Right rest -> header unpacked ++ rest
+
+header :: Packet.Packet -> [Field]
+header unpacked =
+    [ ("flags", byte (Packet.flags unpacked))
+    , ("header_type", Dec (case Packet.headerType unpacked of Packet.Header1 -> 1; Packet.Header2 -> 2))
+    , ("context_flag", Keyword (if Packet.contextFlag unpacked then "set" else "unset"))
+    , ("transport_type", Keyword (case Packet.transportType unpacked of Packet.Broadcast -> "broadcast"; Packet.Transport -> "transport"))
+    , ("destination_type", Keyword (destinationType (Packet.destinationType unpacked)))
+    , ("packet_type", Keyword (packetType (Packet.packetType unpacked)))
+    , ("hops", Dec (fromIntegral (Packet.hops unpacked)))
+    , ("transport_id", maybe Absent Hex (Packet.transportId unpacked))
+    , ("destination_hash", Hex (Packet.address unpacked))
+    , ("context", context (Packet.context unpacked))
+    , ("payload_length", Dec (B.length (Packet.payload unpacked)))
+    ]
+  where
+    destinationType kind = case kind of
+        Packet.Single -> "single"
+        Packet.Group -> "group"
+        Packet.Plain -> "plain"
+        Packet.Link -> "link"
+    packetType kind = case kind of
+        Packet.Data -> "data"
+        Packet.Announce -> "announce"
+        Packet.LinkRequest -> "linkrequest"
+        Packet.Proof -> "proof"
+
+-- | Rule 2. The format spells a context as a keyword only where a
+-- vector carries that byte. Three the reference defines and this
+-- implementation names have no keyword, and print as the byte.
+context :: Packet.Context -> Value
+context named = case named of
+    Packet.None -> Keyword "none"
+    Packet.Resource -> Keyword "resource"
+    Packet.ResourceAdv -> Keyword "resource_adv"
+    Packet.ResourceReq -> Keyword "resource_req"
+    Packet.ResourceHmu -> Keyword "resource_hmu"
+    Packet.ResourcePrf -> Keyword "resource_prf"
+    Packet.ResourceIcl -> Keyword "resource_icl"
+    Packet.ResourceRcl -> Keyword "resource_rcl"
+    Packet.Request -> Keyword "request"
+    Packet.Response -> Keyword "response"
+    Packet.PathResponse -> Keyword "path_response"
+    Packet.Channel -> Keyword "channel"
+    Packet.Keepalive -> Keyword "keepalive"
+    Packet.LinkIdentify -> Keyword "link_identify"
+    Packet.LinkClose -> Keyword "link_close"
+    Packet.LinkProof -> Keyword "link_proof"
+    Packet.LinkRtt -> Keyword "link_rtt"
+    Packet.LinkRequestProof -> Keyword "link_request_proof"
+    Packet.CacheRequest -> unnamed
+    Packet.Command -> unnamed
+    Packet.CommandStatus -> unnamed
+    Packet.UnnamedContext _ -> unnamed
+  where
+    unnamed = byte (Packet.contextByte named)
+
+rejection :: Packet.Rejection -> [Field]
+rejection broken = case broken of
+    Packet.ShortHeader present needed ->
+        [ ("invalid", Keyword "short-header")
+        , ("length", Dec present)
+        , ("minimum_length", Dec needed)
+        ]
+    Packet.HopLimit count limit ->
+        [ ("invalid", Keyword "hop-limit")
+        , ("hops", Dec count)
+        , ("hop_limit", Dec limit)
+        ]
+    Packet.ShortPayload present needed ->
+        [ ("invalid", Keyword "short-payload")
+        , ("payload_length", Dec present)
+        , ("minimum_length", Dec needed)
+        ]
+
 -- Fields
 
 data Value
     = Hex ByteString
+    | Dec Int
+    | Keyword String
     | Absent
 
 type Field = (String, Value)
+
+byte :: Word8 -> Value
+byte = Hex . B.singleton
+
+verdict :: Bool -> Value
+verdict held = Keyword (if held then "yes" else "no")
 
 -- | Rule 6. What the implementation refused is a dash, and the fields
 -- it does not gate still stand.
@@ -106,6 +226,8 @@ render (name, value) = name ++ replicate (nameColumns - length name) ' ' ++ " " 
   where
     nameColumns = 18
     text Absent = "-"
+    text (Dec number) = show number
+    text (Keyword word) = word
     text (Hex bytes)
         | B.null bytes = "-"
         | otherwise = C.unpack (Encoding.convertToBase Encoding.Base16 bytes)
