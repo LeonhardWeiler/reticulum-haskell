@@ -102,7 +102,11 @@ delivered node holder raw = do
 announcing :: Node.Node -> ByteString -> IO ()
 announcing node name = do
     threadDelay (2 * 1000 * 1000)
-    Node.announce node (Destination.name name) B.empty
+    destination <- Node.serve node (Destination.name name) B.empty (Node.Answering took)
+    putStrLn (unwords ["serving", hex (Destination.destinationHashBytes destination)])
+    Node.announce node destination
+  where
+    took plain = putStrLn (unwords ["took", show plain])
 
 announced
     :: Destination.DestinationHash

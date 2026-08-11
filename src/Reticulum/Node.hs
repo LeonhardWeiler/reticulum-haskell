@@ -4,6 +4,7 @@ module Reticulum.Node
     ( Interface (name, transmit)
     , interface
     , Settings (..)
+    , Answering (..)
     , Node
     , start
     , stop
@@ -11,6 +12,7 @@ module Reticulum.Node
     , detach
     , inbound
     , send
+    , serve
     , announce
     , requestPath
     , paths
@@ -39,6 +41,7 @@ import Reticulum.Announce (Announce)
 import qualified Reticulum.Announce as Announce
 import Reticulum.Destination (DestinationHash (DestinationHash, destinationHashBytes), Name)
 import qualified Reticulum.Destination as Destination
+import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Link as Link
 import Reticulum.Packet (Packet (Packet))
@@ -64,8 +67,20 @@ data Settings = Settings
     { transport :: Bool
     }
 
+-- | What a destination of this node's own does with what arrives for it.
+data Answering = Answering
+    { delivered :: ByteString -> IO ()
+    }
+
+data Local = Local
+    { nameHash :: Destination.NameHash
+    , appData :: ByteString
+    , answers :: Answering
+    }
+
 data Node = Node
     { identity :: Identity.PrivateKey
+    , public :: Identity.PublicKey
     , ours :: ByteString
     , settings :: Settings
     , attached :: MVar [Interface]
@@ -75,7 +90,7 @@ data Node = Node
     , links :: MVar (Transport.Links Interface)
     , announces :: MVar (Map DestinationHash Packet)
     , seen :: MVar (Set ByteString)
-    , local :: MVar (Map DestinationHash (Destination.NameHash, ByteString))
+    , local :: MVar (Map DestinationHash Local)
     , requests :: MVar (Set ByteString)
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
     , sweeper :: Maybe ThreadId
@@ -90,7 +105,7 @@ start how private handler = case Identity.toPublic private of
     Left reason -> pure (Left reason)
     Right key -> do
         node <-
-            Node private (Identity.identityHashBytes (Identity.identityHash key)) how
+            Node private key (Identity.identityHashBytes (Identity.identityHash key)) how
                 <$> newMVar []
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
@@ -148,7 +163,48 @@ sorted :: Node -> Interface -> Packet -> IO ()
 sorted node through packet
     | Packet.packetType packet == Packet.Announce = announced node through packet
     | Packet.address packet == Transport.pathRequestAddress = asked node through packet
-    | otherwise = forwarding node (relay node through packet)
+    | otherwise = do
+        mine <- readMVar (local node)
+        case Map.lookup (DestinationHash (Packet.address packet)) mine of
+            Just held -> arrived node through held packet
+            Nothing -> forwarding node (relay node through packet)
+
+-- | A packet for a destination of this node's own goes no further.
+arrived :: Node -> Interface -> Local -> Packet -> IO ()
+arrived node through held packet
+    | Packet.packetType packet /= Packet.Data = pure ()
+    | Packet.destinationType packet /= Packet.Single = pure ()
+    | otherwise = case unsealed node (Packet.payload packet) of
+        Nothing -> pure ()
+        Just plain -> do
+            delivered (answers held) plain
+            prove node through packet
+
+unsealed :: Node -> ByteString -> Maybe ByteString
+unsealed node body = do
+    parts <- either (const Nothing) Just (Encryption.encrypted body)
+    Encryption.opened (Identity.x25519Private (identity node)) (ours node) parts
+
+-- | The proof is addressed to the first half of the hash of the packet
+-- it proves, and carries a signature and nothing else.
+prove :: Node -> Interface -> Packet -> IO ()
+prove node through packet = case Identity.sign (identity node) hash of
+    Left reason -> hPutStrLn stderr ("proof: " ++ reason)
+    Right signed -> transmit through (Packet.pack (written signed))
+  where
+    hash = Packet.packetHash packet
+    written signed =
+        Packet
+            { Packet.contextFlag = False
+            , Packet.transportType = Packet.Broadcast
+            , Packet.destinationType = Packet.Single
+            , Packet.packetType = Packet.Proof
+            , Packet.hops = 0
+            , Packet.transportId = Nothing
+            , Packet.address = B.take Packet.addressLength hash
+            , Packet.context = Packet.None
+            , Packet.payload = signed
+            }
 
 announced :: Node -> Interface -> Packet -> IO ()
 announced node through packet = case Announce.announce packet of
@@ -289,18 +345,26 @@ send node packet = do
             mapM_ (\through -> transmit through (Packet.pack outgoing)) interfaces
         Transport.Nowhere -> pure ()
 
-announce :: Node -> Name -> ByteString -> IO ()
-announce node called carried = case Identity.toPublic (identity node) of
-    Left reason -> hPutStrLn stderr ("announce for " ++ show (Destination.nameBytes called) ++ ": " ++ reason)
-    Right key -> do
-        modifyMVar_ (local node) (pure . Map.insert (whose key) (hash, carried))
-        emit node hash carried Packet.None Nothing
+serve :: Node -> Name -> ByteString -> Answering -> IO DestinationHash
+serve node called carried answering = do
+    modifyMVar_ (local node) (pure . Map.insert destination held)
+    pure destination
   where
     hash = Destination.nameHash called
-    whose key = Destination.destinationHash hash (Just (Identity.identityHash key))
+    destination = whose node hash
+    held = Local {nameHash = hash, appData = carried, answers = answering}
 
-emit :: Node -> Destination.NameHash -> ByteString -> Packet.Context -> Maybe Interface -> IO ()
-emit node hash carried told toward = do
+announce :: Node -> DestinationHash -> IO ()
+announce node destination = do
+    mine <- readMVar (local node)
+    mapM_ (\held -> emit node held Packet.None Nothing) (Map.lookup destination mine)
+
+whose :: Node -> Destination.NameHash -> DestinationHash
+whose node hash =
+    Destination.destinationHash hash (Just (Identity.identityHash (public node)))
+
+emit :: Node -> Local -> Packet.Context -> Maybe Interface -> IO ()
+emit node held told toward = do
     random <- randomHash
     case built random of
         Left reason -> hPutStrLn stderr ("announce: " ++ reason)
@@ -308,10 +372,10 @@ emit node hash carried told toward = do
             Nothing -> send node packet
             Just through -> transmit through (Packet.pack packet)
   where
+    hash = nameHash held
+    destination = whose node hash
     built random = do
-        key <- Identity.toPublic (identity node)
-        let destination = Destination.destinationHash hash (Just (Identity.identityHash key))
-        body <- Announce.emitted (identity node) destination hash random carried
+        body <- Announce.emitted (identity node) destination hash random (appData held)
         pure
             Packet
                 { Packet.contextFlag = False
@@ -347,7 +411,7 @@ answer :: Node -> Interface -> Transport.PathRequest -> IO ()
 answer node through wanted = do
     mine <- readMVar (local node)
     case Map.lookup destination mine of
-        Just (hash, carried) -> emit node hash carried Packet.PathResponse (Just through)
+        Just held -> emit node held Packet.PathResponse (Just through)
         Nothing -> forwarding node $ do
             reachable <- readMVar (table node)
             cached <- readMVar (announces node)

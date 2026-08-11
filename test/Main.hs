@@ -40,6 +40,8 @@ checks =
     , ("a sealed token is padded to the block", pure paddedToTheBlock)
     , ("a token whose hmac was altered opens nothing", pure alteredOpensNothing)
     , ("what is sealed for an identity opens with its key", pure sealedForAnIdentity)
+    , ("a packet for a destination of this node's own is taken and proved", takenAndProved)
+    , ("a packet sealed for another key is not taken", notOpened)
     , ("a path response is not queued", pure notQueued)
     , ("an announce goes out twice", pure emptiedTwice)
     , ("a rebroadcast heard once is counted", pure counted)
@@ -121,7 +123,6 @@ sealedForAnIdentity = do
     secret <- Identity.privateKey (B.replicate Identity.keySize 0x01)
     key <- Identity.toPublic secret
     let salt = Identity.identityHashBytes (Identity.identityHash key)
-        spoken = C.pack "over the link"
     case Encryption.sealed ephemeral (Identity.x25519Public key) salt vector spoken of
         Nothing -> Left "the plaintext was not sealed"
         Just made -> do
@@ -416,6 +417,13 @@ started forwarding = do
 carried :: ByteString
 carried = C.pack "test.carried"
 
+emitting :: Node.Node -> IO ()
+emitting node =
+    Node.serve node (Destination.name carried) B.empty quiet >>= Node.announce node
+
+quiet :: Node.Answering
+quiet = Node.Answering (const (pure ()))
+
 waitFor :: IO (Maybe a) -> IO (Maybe a)
 waitFor look = go (60 :: Int)
   where
@@ -441,7 +449,7 @@ acrossTwoHops = do
     (far, _, _) <- started False
     wire "one" first middle
     wire "two" middle far
-    Node.announce first (Destination.name carried) B.empty
+    emitting first
     found <- waitFor (reached far emitter)
     Node.stop middle
     pure $ case found of
@@ -460,7 +468,7 @@ nothingCarried = do
     (far, _, _) <- started False
     wire "one" first middle
     wire "two" middle far
-    Node.announce first (Destination.name carried) B.empty
+    emitting first
     threadDelay (2 * 1000 * 1000)
     found <- reached far emitter
     heard <- reached middle emitter
@@ -492,6 +500,73 @@ message address =
         , Packet.payload = C.pack "one packet"
         }
 
+-- | The ephemeral scalar is a constant here, and the node that opens
+-- what it sealed never sees it.
+sealedTo :: ByteString -> Identity.PublicKey -> ByteString -> Maybe ByteString
+sealedTo salt key plain =
+    Encryption.pack
+        <$> Encryption.sealed
+            (B.replicate Encryption.ephemeralLength 0x05)
+            (Identity.x25519Public key)
+            salt
+            vector
+            plain
+
+serving :: Node.Node -> IO (IO [ByteString])
+serving node = do
+    took <- newIORef []
+    _ <-
+        Node.serve node (Destination.name carried) B.empty $
+            Node.Answering (\plain -> atomicModifyIORef' took (\kept -> (kept ++ [plain], ())))
+    pure (readIORef took)
+
+takenAndProved :: IO (Either String ())
+takenAndProved = do
+    (near, _, _) <- started False
+    (far, secret, emitter) <- started False
+    (_, backToNear) <- tap "one" near far
+    took <- serving far
+    key <- either (ioError . userError) pure (Identity.toPublic secret)
+    case sealedTo (Identity.identityHashBytes emitter) key spoken of
+        Nothing -> pure (Left "the packet was not sealed")
+        Just body -> do
+            let sent = (message (addressOf emitter)) {Packet.payload = body}
+            Node.send near sent
+            back <- awaited backToNear ((== Packet.Proof) . Packet.packetType)
+            arrived <- took
+            pure $ do
+                expect "what the destination took" [spoken] arrived
+                case back of
+                    Nothing -> Left "no proof came back"
+                    Just proof -> do
+                        expect
+                            "what the proof is addressed to"
+                            (B.take Packet.addressLength (Packet.packetHash sent))
+                            (Packet.address proof)
+                        require "the proof is not signed by the destination" $
+                            Identity.validate key (Packet.packetHash sent) (Packet.payload proof)
+
+notOpened :: IO (Either String ())
+notOpened = do
+    (near, _, _) <- started False
+    (far, secret, emitter) <- started False
+    (_, backToNear) <- tap "one" near far
+    took <- serving far
+    key <- either (ioError . userError) pure (Identity.toPublic secret)
+    case sealedTo elsewhere key spoken of
+        Nothing -> pure (Left "the packet was not sealed")
+        Just body -> do
+            Node.send near ((message (addressOf emitter)) {Packet.payload = body})
+            threadDelay (500 * 1000)
+            arrived <- took
+            proofs <- counting backToNear ((== Packet.Proof) . Packet.packetType)
+            pure $ do
+                expect "what the destination took" [] arrived
+                expect "the proofs that came back" 0 proofs
+
+spoken :: ByteString
+spoken = C.pack "one packet"
+
 throughTheMiddle :: IO (Either String ())
 throughTheMiddle = do
     (near, _, _) <- started False
@@ -499,7 +574,7 @@ throughTheMiddle = do
     (far, _, emitter) <- started False
     (_, backToNear) <- tap "one" near middle
     (towardFar, _) <- tap "two" middle far
-    Node.announce far (Destination.name carried) B.empty
+    emitting far
     known <- waitFor (reached near emitter)
     outcome <- case known of
         Nothing -> pure (Left "the path to the far node was not learned")
@@ -557,7 +632,7 @@ linkThroughTheMiddle = do
     (far, secret, emitter) <- started False
     (_, backToNear) <- tap "one" near middle
     (towardFar, _) <- tap "two" middle far
-    Node.announce far (Destination.name carried) B.empty
+    emitting far
     learned <- waitFor (reached near emitter)
     outcome <- case learned of
         Nothing -> pure (Left "the path to the far node was not learned")
@@ -572,10 +647,10 @@ linkThroughTheMiddle = do
                         Node.send far proof
                         crossed' <- awaited backToNear ((== Packet.LinkRequestProof) . Packet.context)
                         Node.send near (speaking (Link.linkId request))
-                        spoken <- awaited towardFar ((== Packet.Link) . Packet.destinationType)
+                        carried' <- awaited towardFar ((== Packet.Link) . Packet.destinationType)
                         pure $ do
                             require "the link proof did not cross back" (isJust crossed')
-                            require "the link carried nothing" (isJust spoken)
+                            require "the link carried nothing" (isJust carried')
     Node.stop middle
     pure outcome
 
@@ -617,7 +692,7 @@ pathAnswered = do
     (middle, _, _) <- started True
     (far, _, emitter) <- started False
     wire "two" middle far
-    Node.announce far (Destination.name carried) B.empty
+    emitting far
     learned <- waitFor (reached middle emitter)
     outcome <- case learned of
         Nothing -> pure (Left "the node between did not learn the path")
@@ -638,7 +713,7 @@ ownPathAnswered = do
     (near, _, _) <- started False
     (far, _, emitter) <- started False
     (_, backToNear) <- tap "one" near far
-    Node.announce far (Destination.name carried) B.empty
+    emitting far
     Node.send near (asking (addressOf emitter) (Just (B.replicate 16 0x66)))
     answered <- awaited backToNear response
     pure (require "no path response came back" (isJust answered))
@@ -648,7 +723,7 @@ taglessIgnored = do
     (near, _, _) <- started False
     (far, _, emitter) <- started False
     (_, backToNear) <- tap "one" near far
-    Node.announce far (Destination.name carried) B.empty
+    emitting far
     Node.send near (asking (addressOf emitter) Nothing)
     threadDelay (1500 * 1000)
     answers <- counting backToNear response
@@ -659,7 +734,7 @@ twiceAsked = do
     (near, _, _) <- started False
     (far, _, emitter) <- started False
     (_, backToNear) <- tap "one" near far
-    Node.announce far (Destination.name carried) B.empty
+    emitting far
     Node.send near (asking (addressOf emitter) (Just (B.replicate 16 0x77)))
     Node.send near (asking (addressOf emitter) (Just (B.replicate 16 0x77)))
     threadDelay (1500 * 1000)
