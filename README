@@ -26,7 +26,7 @@ Nix is the only thing that has to be installed.
     ./check
 
 The shell carries the compiler, cabal, and the C compiler and POSIX
-tools the corpus builds itself with. flake.nix names the compiler and
+tools the corpus builds itself with. Flake.nix names the compiler and
 flake.lock pins the package set.
 
 
@@ -57,10 +57,6 @@ Layout
     CORPUS             the pin
     DEPENDS            every dependency past base and the crypto library,
                        and what needs it
-
-The library cites neither the reference nor the corpus. A module is
-named for what it holds, and where the bytes come from is a question
-this file and the corpus answer, not a header on every function.
 
 
 The harness
