@@ -276,11 +276,14 @@ proofed valid through packet links = case Map.lookup key links of
 
 -- | A link that was never proved is given the time its request needed,
 -- and one that was is kept as long as it could still carry a packet.
-aged :: Time -> Links i -> Links i
-aged now = Map.filter alive
+aged :: Eq i => Time -> [i] -> Links i -> Links i
+aged now attached = Map.filter alive
   where
     alive entry
-        | proven entry = seconds (stamp entry) + linkLifetime > seconds now
+        | proven entry =
+            seconds (stamp entry) + linkLifetime > seconds now
+                && ahead entry `elem` attached
+                && behind entry `elem` attached
         | otherwise = seconds (deadline entry) > seconds now
 
 data Return i = Return
@@ -311,8 +314,14 @@ returned through packet backwards = case Map.lookup (Packet.address packet) back
         , Map.delete (Packet.address packet) backwards
         )
 
-forgotten :: Time -> Reverse i -> Reverse i
-forgotten now = Map.filter ((> seconds now) . (+ reverseLifetime) . seconds . since)
+-- | An entry whose way back is gone is as spent as one that timed out.
+forgotten :: Eq i => Time -> [i] -> Reverse i -> Reverse i
+forgotten now attached = Map.filter alive
+  where
+    alive entry =
+        seconds (since entry) + reverseLifetime > seconds now
+            && inward entry `elem` attached
+            && outward entry `elem` attached
 
 trace :: Packet -> ByteString
 trace = B.take addressLength . Packet.packetHash

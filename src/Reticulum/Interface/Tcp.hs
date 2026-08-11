@@ -2,25 +2,30 @@
 
 module Reticulum.Interface.Tcp
     ( Peer (..)
+    , label
     , Tcp (..)
     , start
+    , Server (..)
+    , serve
     , hardwareMtu
     ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, withMVar)
 import Control.Exception (IOException, bracketOnError, catch, try)
-import Control.Monad (unless, void, when)
+import Control.Monad (forever, unless, void, when)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import qualified Network.Socket as Net
 import Network.Socket
-    ( AddrInfo (addrAddress, addrFamily, addrSocketType)
+    ( AddrInfo (addrAddress, addrFamily, addrFlags, addrSocketType)
+    , AddrInfoFlag (AI_PASSIVE)
     , HostName
     , ServiceName
     , ShutdownCmd (ShutdownBoth)
     , Socket
-    , SocketOption (KeepAlive, NoDelay)
+    , SocketOption (KeepAlive, NoDelay, ReuseAddr)
     , SocketType (Stream)
     , close
     , connect
@@ -52,6 +57,9 @@ data Peer = Peer
     , port :: ServiceName
     }
 
+label :: Peer -> String
+label peer = host peer ++ ":" ++ port peer
+
 data Tcp = Tcp
     { transmit :: ByteString -> IO ()
     , detach :: IO ()
@@ -66,7 +74,7 @@ start peer deliver = do
     _ <- forkIO (dialling peer held running deliver)
     pure
         Tcp
-            { transmit = writing peer held . Hdlc.framed
+            { transmit = writing (label peer) held . Hdlc.framed
             , detach = do
                 writeIORef running False
                 shut held
@@ -83,7 +91,7 @@ dialling peer held running deliver = loop
         dialled <- try (dial peer)
         case dialled of
             Left failure -> do
-                note peer ("no connection: " ++ show (failure :: IOException))
+                note (label peer) ("no connection: " ++ show (failure :: IOException))
                 threadDelay reconnectWait
             Right established -> do
                 modifyMVar_ held (const (pure (Just established)))
@@ -92,7 +100,7 @@ dialling peer held running deliver = loop
                 quiet (close established)
                 again <- readIORef running
                 when again $ do
-                    note peer (ending outcome)
+                    note (label peer) (ending outcome)
                     threadDelay reconnectWait
 
     ending (Left failure) = "socket failed: " ++ show (failure :: IOException)
@@ -129,13 +137,13 @@ reading established deliver = go B.empty
     carried frame =
         B.length frame > headerLength Header1 && B.length frame <= hardwareMtu
 
-writing :: Peer -> MVar (Maybe Socket) -> ByteString -> IO ()
-writing peer held raw = withMVar held sending
+writing :: String -> MVar (Maybe Socket) -> ByteString -> IO ()
+writing named held raw = withMVar held sending
   where
     sending Nothing = pure ()
     sending (Just established) =
         Socket.sendAll established raw `catch` \failure -> do
-            note peer ("transmit failed: " ++ show (failure :: IOException))
+            note named ("transmit failed: " ++ show (failure :: IOException))
             quiet (shutdown established ShutdownBoth)
 
 shut :: MVar (Maybe Socket) -> IO ()
@@ -144,6 +152,60 @@ shut held = withMVar held (mapM_ (\established -> quiet (shutdown established Sh
 quiet :: IO () -> IO ()
 quiet action = void (try action :: IO (Either IOException ()))
 
-note :: Peer -> String -> IO ()
-note peer message =
-    hPutStrLn stderr (concat ["tcp ", host peer, ":", port peer, ": ", message])
+note :: String -> String -> IO ()
+note named message = hPutStrLn stderr (concat ["tcp ", named, ": ", message])
+
+newtype Server = Server
+    { unbind :: IO ()
+    }
+
+-- | Every connection accepted is its own interface, and the caller says
+-- what reads it and what to do when it ends before the first byte
+-- arrives.
+serve :: ServiceName -> (String -> Tcp -> IO (ByteString -> IO (), IO ())) -> IO Server
+serve service accepted = do
+    listening <- bound service
+    thread <- forkIO (forever (taking listening))
+    pure Server {unbind = killThread thread >> quiet (close listening)}
+  where
+    taking listening = do
+        (established, address) <- Net.accept listening
+        void (forkIO (served established (show address)))
+
+    served established named = do
+        setSocketOption established NoDelay 1
+        setSocketOption established KeepAlive 1
+        held <- newMVar (Just established)
+        (deliver, ended) <-
+            accepted
+                named
+                Tcp
+                    { transmit = writing named held . Hdlc.framed
+                    , detach = shut held
+                    }
+        outcome <- try (reading established deliver)
+        modifyMVar_ held (const (pure Nothing))
+        quiet (close established)
+        note named (ending outcome)
+        ended
+
+    ending (Left failure) = "socket failed: " ++ show (failure :: IOException)
+    ending (Right ()) = "socket closed"
+
+bound :: ServiceName -> IO Socket
+bound service = do
+    addresses <-
+        getAddrInfo
+            (Just defaultHints {addrFlags = [AI_PASSIVE], addrSocketType = Stream})
+            Nothing
+            (Just service)
+    case addresses of
+        [] -> ioError (userError "no address")
+        (address : _) -> bracketOnError (open address) close (settle address)
+  where
+    open address = socket (addrFamily address) Stream defaultProtocol
+    settle address listening = do
+        setSocketOption listening ReuseAddr 1
+        Net.bind listening (addrAddress address)
+        Net.listen listening 8
+        pure listening

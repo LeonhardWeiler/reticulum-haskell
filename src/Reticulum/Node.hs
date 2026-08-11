@@ -8,6 +8,7 @@ module Reticulum.Node
     , start
     , stop
     , attach
+    , detach
     , inbound
     , send
     , announce
@@ -111,6 +112,9 @@ stop = maybe (pure ()) killThread . sweeper
 
 attach :: Node -> Interface -> IO ()
 attach node through = modifyMVar_ (attached node) (pure . (++ [through]))
+
+detach :: Node -> Interface -> IO ()
+detach node through = modifyMVar_ (attached node) (pure . filter (/= through))
 
 paths :: Node -> IO (Path.Table Interface)
 paths = readMVar . table
@@ -254,10 +258,11 @@ sweepInterval = 1000 * 1000
 sweep :: Node -> IO ()
 sweep node = do
     now <- clock
+    interfaces <- readMVar (attached node)
     sending <- modifyMVar (waiting node) (pure . swapped . Transport.due now)
     mapM_ (rebroadcast node) sending
-    modifyMVar_ (returns node) (pure . Transport.forgotten now)
-    modifyMVar_ (links node) (pure . Transport.aged now)
+    modifyMVar_ (returns node) (pure . Transport.forgotten now interfaces)
+    modifyMVar_ (links node) (pure . Transport.aged now interfaces)
 
 swapped :: (a, b) -> (b, a)
 swapped (one, other) = (other, one)

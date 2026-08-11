@@ -190,8 +190,12 @@ linkProof away =
 
 linkAged :: Either String ()
 linkAged = do
-    expect "before the request could be answered" 1 (Map.size (Transport.aged (Time 10) crossed))
-    expect "after it could not" 0 (Map.size (Transport.aged (Time 19) crossed))
+    expect "before the request could be answered" 1 (Map.size (Transport.aged (Time 10) sides crossed))
+    expect "after it could not" 0 (Map.size (Transport.aged (Time 19) sides crossed))
+    expect "with one side gone" 0 (Map.size (Transport.aged (Time 10) ['a'] answered))
+  where
+    sides = ['a', 'b']
+    answered = snd (Transport.proofed (const True) 'a' (linkProof 3) crossed)
 
 linkNotRemembered :: Either String ()
 linkNotRemembered =
