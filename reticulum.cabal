@@ -22,6 +22,7 @@ library
                      Reticulum.Identity
                      Reticulum.Interface
                      Reticulum.Interface.Hdlc
+                     Reticulum.Interface.Tcp
                      Reticulum.Link
                      Reticulum.Msgpack
                      Reticulum.Packet
@@ -36,6 +37,7 @@ library
                    , containers
                    , crypton
                    , memory
+                   , network
 
 executable harness
     import:         strict

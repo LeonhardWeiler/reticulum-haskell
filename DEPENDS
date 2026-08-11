@@ -4,6 +4,9 @@ cryptography library, and what needs each.
     crypton      the cryptography library: SHA-256, Ed25519, X25519,
                  AES-256-CBC, HMAC-SHA-256
 
+    network      the TCP interface's socket, and the address it is
+                 dialled at
+
     memory       crypton hands back digests and keys as ByteArray, and
                  Data.ByteArray.convert is the way to a ByteString.
                  The harness reads and writes hex through

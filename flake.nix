@@ -18,7 +18,7 @@
       devShells = forEach (pkgs:
         let
           hp = pkgs.haskell.packages.${compiler};
-          ghc = hp.ghcWithPackages (p: [ p.bytestring p.containers p.crypton ]);
+          ghc = hp.ghcWithPackages (p: [ p.bytestring p.containers p.crypton p.network ]);
         in
         {
           default = pkgs.mkShell {

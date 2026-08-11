@@ -1,0 +1,149 @@
+{-# LANGUAGE StrictData #-}
+
+module Reticulum.Interface.Tcp
+    ( Peer (..)
+    , Tcp (..)
+    , start
+    , hardwareMtu
+    ) where
+
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, withMVar)
+import Control.Exception (IOException, bracketOnError, catch, try)
+import Control.Monad (unless, void, when)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as B
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Network.Socket
+    ( AddrInfo (addrAddress, addrFamily, addrSocketType)
+    , HostName
+    , ServiceName
+    , ShutdownCmd (ShutdownBoth)
+    , Socket
+    , SocketOption (KeepAlive, NoDelay)
+    , SocketType (Stream)
+    , close
+    , connect
+    , defaultHints
+    , defaultProtocol
+    , getAddrInfo
+    , setSocketOption
+    , shutdown
+    , socket
+    )
+import qualified Network.Socket.ByteString as Socket
+import System.IO (hPutStrLn, stderr)
+import System.Timeout (timeout)
+
+import qualified Reticulum.Interface.Hdlc as Hdlc
+import Reticulum.Packet (HeaderType (Header1), headerLength)
+
+hardwareMtu :: Int
+hardwareMtu = 262144
+
+connectTimeout :: Int
+connectTimeout = 5 * 1000000
+
+reconnectWait :: Int
+reconnectWait = 5 * 1000000
+
+data Peer = Peer
+    { host :: HostName
+    , port :: ServiceName
+    }
+
+data Tcp = Tcp
+    { transmit :: ByteString -> IO ()
+    , detach :: IO ()
+    }
+
+-- | The socket is dialled, read and dialled again by the one thread,
+-- and the interface is the pair of things another thread may do to it.
+start :: Peer -> (ByteString -> IO ()) -> IO Tcp
+start peer deliver = do
+    held <- newMVar Nothing
+    running <- newIORef True
+    _ <- forkIO (dialling peer held running deliver)
+    pure
+        Tcp
+            { transmit = writing peer held . Hdlc.framed
+            , detach = do
+                writeIORef running False
+                shut held
+            }
+
+dialling :: Peer -> MVar (Maybe Socket) -> IORef Bool -> (ByteString -> IO ()) -> IO ()
+dialling peer held running deliver = loop
+  where
+    loop = do
+        alive <- readIORef running
+        when alive (attempt >> loop)
+
+    attempt = do
+        dialled <- try (dial peer)
+        case dialled of
+            Left failure -> do
+                note peer ("no connection: " ++ show (failure :: IOException))
+                threadDelay reconnectWait
+            Right established -> do
+                modifyMVar_ held (const (pure (Just established)))
+                outcome <- try (reading established deliver)
+                modifyMVar_ held (const (pure Nothing))
+                quiet (close established)
+                again <- readIORef running
+                when again $ do
+                    note peer (ending outcome)
+                    threadDelay reconnectWait
+
+    ending (Left failure) = "socket failed: " ++ show (failure :: IOException)
+    ending (Right ()) = "socket closed"
+
+dial :: Peer -> IO Socket
+dial peer = do
+    addresses <- getAddrInfo (Just defaultHints {addrSocketType = Stream}) (Just (host peer)) (Just (port peer))
+    case addresses of
+        [] -> ioError (userError "no address")
+        (address : _) -> bracketOnError (open address) close (settle address)
+  where
+    open address = socket (addrFamily address) Stream defaultProtocol
+    settle address opened = do
+        setSocketOption opened NoDelay 1
+        setSocketOption opened KeepAlive 1
+        reached <- timeout connectTimeout (connect opened (addrAddress address))
+        case reached of
+            Nothing -> ioError (userError "connection timed out")
+            Just () -> pure opened
+
+-- | A frame no longer than a header holds no packet, and one longer
+-- than the interface can carry was never sent by a peer of it.
+reading :: Socket -> (ByteString -> IO ()) -> IO ()
+reading established deliver = go B.empty
+  where
+    go buffer = do
+        chunk <- Socket.recv established 4096
+        unless (B.null chunk) $ do
+            let (complete, kept) = Hdlc.frames (2 * hardwareMtu) (buffer <> chunk)
+            mapM_ deliver (filter carried complete)
+            go kept
+
+    carried frame =
+        B.length frame > headerLength Header1 && B.length frame <= hardwareMtu
+
+writing :: Peer -> MVar (Maybe Socket) -> ByteString -> IO ()
+writing peer held raw = withMVar held sending
+  where
+    sending Nothing = pure ()
+    sending (Just established) =
+        Socket.sendAll established raw `catch` \failure -> do
+            note peer ("transmit failed: " ++ show (failure :: IOException))
+            quiet (shutdown established ShutdownBoth)
+
+shut :: MVar (Maybe Socket) -> IO ()
+shut held = withMVar held (mapM_ (\established -> quiet (shutdown established ShutdownBoth)))
+
+quiet :: IO () -> IO ()
+quiet action = void (try action :: IO (Either IOException ()))
+
+note :: Peer -> String -> IO ()
+note peer message =
+    hPutStrLn stderr (concat ["tcp ", host peer, ":", port peer, ": ", message])
