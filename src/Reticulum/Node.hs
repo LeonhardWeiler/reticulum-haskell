@@ -333,14 +333,15 @@ spoken node through session packet
         Left _ -> pure ()
         Right written -> do
             done <- modifyMVar (sessions node) (pure . dropping written)
-            when done (proved (answering session) (Resource.provedResource written))
+            mapM_ (moving node session link) done
     dropping written running = case Map.lookup link running of
         Just held
-            | Just gone <- Map.lookup (Resource.provedResource written) (handing held) ->
+            | Just gone <- Map.lookup (Resource.provedResource written) (handing held)
+            , Resource.concluded written gone ->
                 ( Map.insert link held {handing = Map.delete (Resource.given gone) (handing held)} running
-                , Resource.concluded written gone
+                , Just gone
                 )
-        _ -> (running, False)
+        _ -> (running, Nothing)
     names plain = case Link.identify plain of
         Just who
             | Link.identifyValid link who ->
@@ -500,11 +501,12 @@ assembling node session link held stream = do
         Just body
             | Identity.fullHash (body <> Resource.entropy held) /= Resource.resource held -> pure ()
             | otherwise -> do
+                complete <- collected node link held (metadata held body)
                 writing
                     node
                     session
                     (onLink link Packet.Proof Packet.ResourcePrf (Resource.proving body held))
-                concluded node session link held (metadata held body)
+                mapM_ (finished node session link held) complete
   where
     unwrapped
         | Resource.covered held = Link.opened (keys session) stream
@@ -531,15 +533,16 @@ metadata held body
   where
     size = B.foldl' (\held' byte -> held' * 256 + fromIntegral byte) 0 (B.take 3 body)
 
--- | A resource in segments is one resource, and the last of them is
--- where it goes on.
-concluded :: Node -> Session -> ByteString -> Resource.Taking -> ByteString -> IO ()
-concluded node session link held body
+-- | A resource in segments is one resource, and only the last of them
+-- is answered with what all of them came to; the segment is put away
+-- before it is proved, because the next one follows the proof.
+collected :: Node -> ByteString -> Resource.Taking -> ByteString -> IO (Maybe ByteString)
+collected node link held body
     | Resource.index held < Resource.segments held =
-        modifyMVar_ (sessions node) (pure . Map.adjust keeping link)
+        Nothing <$ modifyMVar_ (sessions node) (pure . Map.adjust keeping link)
     | otherwise = do
         earlier <- modifyMVar (sessions node) (pure . gathered)
-        given (earlier <> body)
+        pure (Just (earlier <> body))
   where
     keeping running =
         running
@@ -552,12 +555,17 @@ concluded node session link held body
             ( Map.insert link kept {gathering = Map.delete (Resource.original held) (gathering kept)} running
             , fromMaybe B.empty (Map.lookup (Resource.original held) (gathering kept))
             )
-    given whole = case Resource.identifier held of
-        Just identifier
-            | Resource.asked held -> served node session link identifier whole
-            | Resource.replied held -> mapM_ (uncurry (answered (answering session))) (back whole)
-        _ -> assembled (answering session) whole
-    back whole = case Request.response whole of
+
+-- | What the whole of a resource was for: the path a request named, the
+-- request an answer belongs to, or the end that took it.
+finished :: Node -> Session -> ByteString -> Resource.Taking -> ByteString -> IO ()
+finished node session link held whole = case Resource.identifier held of
+    Just identifier
+        | Resource.asked held -> served node session link identifier whole
+        | Resource.replied held -> mapM_ (uncurry (answered (answering session))) back
+    _ -> assembled (answering session) whole
+  where
+    back = case Request.response whole of
         Left _ -> Nothing
         Right taken' -> (,) <$> Request.requestId taken' <*> Request.responseBody taken'
 
@@ -589,8 +597,19 @@ giving node session link plain = case Resource.partRequest plain of
 hand :: Node -> ByteString -> ByteString -> IO (Maybe ByteString)
 hand node link body = handed node link body Nothing
 
+-- | Data longer than one segment goes over a segment at a time, and the
+-- hash that comes back is the one the whole of it is known by.
 handed :: Node -> ByteString -> ByteString -> Maybe (ByteString, Bool) -> IO (Maybe ByteString)
-handed node link body asking' = do
+handed node link body asking' = uncurry (advertising node link asking') (Resource.firstSegment body)
+
+advertising
+    :: Node
+    -> ByteString
+    -> Maybe (ByteString, Bool)
+    -> ByteString
+    -> Resource.Segment
+    -> IO (Maybe ByteString)
+advertising node link asking' body told = do
     running <- readMVar (sessions node)
     case Map.lookup link running of
         Nothing -> pure Nothing
@@ -603,16 +622,25 @@ handed node link body asking' = do
                     let kept = made session salt stream
                     modifyMVar_ (sessions node) (pure . Map.adjust (keeping kept) link)
                     _ <- sending node session link Packet.ResourceAdv (advertisement kept)
-                    pure (Just (Resource.given kept))
+                    pure (Just (Resource.heading kept))
   where
+    squeezing = Resource.spanning told body <= Resource.autoCompressLimit
     packed = Lazy.toStrict (BZip.compress (Lazy.fromStrict body))
-    shorter = B.length packed < B.length body
+    shorter = squeezing && B.length packed < B.length body
     carried = if shorter then packed else body
     made session salt stream =
-        Resource.giving (Link.partSize (unit session)) salt body stream shorter asking'
+        Resource.giving (Link.partSize (unit session)) told salt body stream shorter asking'
     advertisement = Resource.packAdvertisement . Resource.advertised
     keeping kept session' =
         session' {handing = Map.insert (Resource.given kept) kept (handing session')}
+
+-- | The segment that was proved is followed by the next one, and the
+-- end that handed the resource over hears about it once, when the last
+-- of them is proved.
+moving :: Node -> Session -> ByteString -> Resource.Giving -> IO ()
+moving node session link gone = case Resource.nextSegment gone of
+    Nothing -> proved (answering session) (Resource.heading gone)
+    Just (body, told) -> void (advertising node link (Resource.answers gone) body told)
 
 -- | A proof on a link carries the hash it proves, which one from a
 -- destination does not.

@@ -22,10 +22,16 @@ module Reticulum.Resource
     , whole
     , proving
     , Giving (..)
+    , Segment (..)
+    , firstSegment
+    , nextSegment
+    , spanning
     , giving
     , advertised
     , handing
     , concluded
+    , maxSegmentSize
+    , autoCompressLimit
     , hashLength
     , mapHashLength
     , randomHashLength
@@ -339,24 +345,87 @@ data Giving = Giving
     , cut :: [ByteString]
     , marks :: [ByteString]
     , awaited :: ByteString
-    , measure :: Int
+    , spanned :: Word64
+    , heading :: ByteString
+    , which :: Segment
     , squeezed :: Bool
     , answers :: Maybe (ByteString, Bool)
     , least :: Int
     }
 
--- | Both hashes are over the data, and neither is over what is sent:
--- the stream that goes out is compressed and sealed, and the far end
--- proves what it got back out of it.
-giving :: Int -> ByteString -> ByteString -> ByteString -> Bool -> Maybe (ByteString, Bool) -> Giving
-giving size salt' body stream compressed' asking =
+-- | Which segment of a resource is being handed over, what the first of
+-- them went out under, and the data still to go after this one.
+data Segment = Segment
+    { nth :: Word64
+    , outOf :: Word64
+    , preceded :: Maybe ByteString
+    , left :: ByteString
+    }
+
+-- | Longer than this and the data is handed over a segment at a time,
+-- each segment a resource of its own.
+maxSegmentSize :: Int
+maxSegmentSize = 1024 * 1024 - 1
+
+-- | Past this much the data is sent as it is, however well it would
+-- have compressed.
+autoCompressLimit :: Int
+autoCompressLimit = 64 * 1024 * 1024
+
+firstSegment :: ByteString -> (ByteString, Segment)
+firstSegment body =
+    ( B.take maxSegmentSize body
+    , Segment
+        { nth = 1
+        , outOf = fromIntegral (max 1 ((B.length body + maxSegmentSize - 1) `div` maxSegmentSize))
+        , preceded = Nothing
+        , left = B.drop maxSegmentSize body
+        }
+    )
+
+nextSegment :: Giving -> Maybe (ByteString, Segment)
+nextSegment value
+    | B.null (left held) = Nothing
+    | otherwise =
+        Just
+            ( B.take maxSegmentSize (left held)
+            , held
+                { nth = nth held + 1
+                , preceded = Just (heading value)
+                , left = B.drop maxSegmentSize (left held)
+                }
+            )
+  where
+    held = which value
+
+-- | Every segment before this one was a whole one, so what is left says
+-- how long the resource is.
+spanning :: Segment -> ByteString -> Int
+spanning told body =
+    (fromIntegral (nth told) - 1) * maxSegmentSize + B.length body + B.length (left told)
+
+-- | Both hashes are over the data of this segment, and neither is over
+-- what is sent: the stream that goes out is compressed and sealed, and
+-- the far end proves what it got back out of it.
+giving
+    :: Int
+    -> Segment
+    -> ByteString
+    -> ByteString
+    -> ByteString
+    -> Bool
+    -> Maybe (ByteString, Bool)
+    -> Giving
+giving size told salt' body stream compressed' asking =
     Giving
         { given = hash
         , salt = salt'
         , cut = chunks size stream
         , marks = map (mark salt') (chunks size stream)
         , awaited = Identity.fullHash (body <> hash)
-        , measure = B.length body
+        , spanned = fromIntegral (spanning told body)
+        , heading = fromMaybe hash (preceded told)
+        , which = told
         , squeezed = compressed'
         , answers = asking
         , least = 0
@@ -373,24 +442,25 @@ advertised :: Giving -> Advertisement
 advertised value =
     Advertisement
         { transferSize = Just (fromIntegral (sum (map B.length (cut value))))
-        , dataSize = Just (fromIntegral (measure value))
+        , dataSize = Just (spanned value)
         , parts = Just (fromIntegral (length (cut value)))
         , resourceHash = Just (given value)
         , randomHash = Just (salt value)
-        , originalHash = Just (given value)
-        , segmentIndex = Just 1
-        , totalSegments = Just 1
+        , originalHash = Just (heading value)
+        , segmentIndex = Just (nth (which value))
+        , totalSegments = Just (outOf (which value))
         , requestId = fst <$> answers value
         , flags = Just (flagged value)
         , hashmap = Just (B.concat (take hashmapSegment (marks value)))
         }
 
--- | The stream is always sealed and never split, and the two bits that
--- say which way a request is going are the same bit read twice.
+-- | The stream is always sealed, and the two bits that say which way a
+-- request is going are the same bit read twice.
 flagged :: Giving -> Word8
 flagged value =
     1
         .|. (if squeezed value then 2 else 0)
+        .|. (if outOf (which value) > 1 then 4 else 0)
         .|. (case answers value of Just (_, False) -> 8; _ -> 0)
         .|. (case answers value of Just (_, True) -> 16; _ -> 0)
 

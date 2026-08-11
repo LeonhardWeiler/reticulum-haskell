@@ -56,6 +56,7 @@ checks =
     , ("a request too long for one packet goes as a resource", requestSent 4000)
     , ("a resource this node hands over arrives whole and is proved", resourceGiven 3000)
     , ("a resource past one hashmap is handed the rest of it", resourceGiven 60000)
+    , ("a resource past one segment is handed over as two", resourceGiven (Resource.maxSegmentSize + 1000))
     , ("a request on a link is answered on the path it names", requestAnswered)
     , ("a resource is taken in parts and proved", resourceTaken False)
     , ("a resource that is compressed is taken", resourceTaken True)
@@ -820,10 +821,16 @@ resourceGiven size = do
                     proved <- gathered proofs
                     pure $ do
                         require "the resource did not go" (isJust handed)
-                        expect "what the far end took" [body] arrived
+                        expect "how much the far end took" [B.length body] (map B.length arrived)
+                        expect "what the far end took" [digest body] (map digest arrived)
                         expect "the resource the proof named" (maybe [] pure handed) proved
   where
     body = grain size
+
+-- | What a resource carries is too long to print, and its hash says the
+-- same thing.
+digest :: ByteString -> ByteString
+digest = Identity.fullHash
 
 -- | Bytes that do not compress, so what is sent is as long as what was
 -- asked for.

@@ -110,6 +110,11 @@ taken only when it was emitted later than the one on file, and an
 announce the table keeps nothing of is one nothing above it hears
 about.
 
+A resource longer than a megabyte goes over a segment at a time. Each
+segment is advertised, handed over and proved on its own, the next one
+follows the proof of the one before it, and the far end puts them back
+together under the hash the first went out with.
+
 A destination the node holds is a destination it answers for. A packet
 addressed to it is opened and proved. A link request is answered, and
 on the link that opens, a packet is taken and proved, a keepalive is
