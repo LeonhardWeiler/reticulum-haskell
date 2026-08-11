@@ -82,11 +82,13 @@ vector can be rebuilt at all.
 
 The node
 
-    node [-t] [-l <port>] [-n <name>] [-k <file>] [<host>:<port> ...]
+    node [-t] [-l <port>] [-n <name>] [-d <hex>] [-k <file>]
+         [<host>:<port> ...]
 
     -t          be a transport node
     -l <port>   listen, and take every connection as an interface
     -n <name>   hold this destination, and announce it once
+    -d <hex>    open a link to this destination and speak on it
     -k <file>   the identity, written if the file is not there
 
 Dials every peer given and answers on the port given, and prints a line
@@ -117,6 +119,13 @@ and proved. Two request paths are served: echo answers with what it was
 asked, and length with how many bytes that was, which is the answer a
 request too long for one packet gets.
 
+With -d the node is the end that opens. It asks for the path until it
+has one, opens a link to that destination, and on it sends a packet and
+waits for the proof, asks echo and takes the answer, asks length with
+more than one packet holds so the request goes as a resource, and hands
+a resource over and waits for the proof of it. Every one of those
+prints a line.
+
 
 Tests
 
@@ -124,24 +133,29 @@ Tests
 
 There are none here that a vector already proves. What belongs here is
 what the corpus cannot hold: properties, and the layers above link.
-Today that is the transport node and what a destination answers: the
-rules the tables follow, the token in the direction that encrypts, and
-nodes wired to each other in memory, one carrying what another
-announced, opening a link across it, proving what crossed, and
-answering a link, a request and a resource of its own.
+Today that is the transport node and what either end of a link does:
+the rules the tables follow, the token in the direction that encrypts,
+and nodes wired to each other in memory, one carrying what another
+announced, opening a link across it, proving what crossed, answering a
+link, a request and a resource of its own, and opening a link of its
+own to send a request and hand a resource over.
 
     ./reference/check
 
 is the same node between two python-rns nodes that cannot reach each
-other any other way, and a third that talks to the node itself. It
-needs python-rns importable, takes about two and a half minutes, and is
-not run in CI. Fifteen lines are checked. Through the node: it hears
-the announce, the far side has no path and then has one two hops away,
-a packet across it is proved, a link opens, and what is said over that
-link arrives. To the node: a path it answers for itself, a packet it
-proves, a link it answers, a packet on that link it proves, a request
-it serves, a request too long for one packet that arrives as a resource
-and is answered from it, and a resource it takes whole.
+other any other way, a third that talks to the node itself, and a
+fourth the node talks to. It needs python-rns importable, takes about
+three minutes, and is not run in CI. Twenty-four lines are checked.
+Through the node: it hears the announce, the far side has no path and
+then has one two hops away, a packet across it is proved, a link opens,
+and what is said over that link arrives. To the node: a path it answers
+for itself, a packet it proves, a link it answers, a packet on that
+link it proves, a request it serves, a request too long for one packet
+that arrives as a resource and is answered from it, an answer as long
+as what was asked that goes back as one, and a resource it takes whole.
+From the node: a link it opens, a packet on it that is proved, an
+answer to a request it sent, a request of its own too long for one
+packet, and a resource it hands over and sees proved.
 
 
 License
