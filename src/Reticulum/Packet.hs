@@ -3,7 +3,10 @@
 module Reticulum.Packet
     ( Packet (..)
     , unpack
+    , pack
+    , flags
     , HeaderType (..)
+    , headerType
     , headerLength
     , TransportType (..)
     , DestinationType (..)
@@ -19,9 +22,10 @@ module Reticulum.Packet
     , pathfinderM
     ) where
 
-import Data.Bits (shiftR, testBit, (.&.))
+import Data.Bits (bit, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
 
 import qualified Reticulum.Identity as Identity
@@ -146,9 +150,7 @@ data Rejection
 -- request proof carries a link id there and a delivery proof half a
 -- packet hash.
 data Packet = Packet
-    { flags :: Word8
-    , headerType :: HeaderType
-    , contextFlag :: Bool
+    { contextFlag :: Bool
     , transportType :: TransportType
     , destinationType :: DestinationType
     , packetType :: PacketType
@@ -159,9 +161,38 @@ data Packet = Packet
     , payload :: ByteString
     }
 
+-- | The second header length is what the transport id is carried in, so
+-- the two cannot disagree.
+headerType :: Packet -> HeaderType
+headerType = maybe Header1 (const Header2) . transportId
+
 headerLength :: HeaderType -> Int
 headerLength Header1 = 2 + addressLength + 1
 headerLength Header2 = 2 + 2 * addressLength + 1
+
+-- | Bit 7 is the interface access code, which a packet does not carry
+-- and the frame around it sets.
+flags :: Packet -> Word8
+flags value =
+    header .|. contexted .|. transported .|. destinationBits .|. packetBits
+  where
+    header = case headerType value of
+        Header1 -> 0
+        Header2 -> bit 6
+    contexted = if contextFlag value then bit 5 else 0
+    transported = case transportType value of
+        Broadcast -> 0
+        Transport -> bit 4
+    destinationBits = case destinationType value of
+        Single -> 0
+        Group -> 1 `shiftL` 2
+        Plain -> 2 `shiftL` 2
+        Link -> 3 `shiftL` 2
+    packetBits = case packetType value of
+        Data -> 0
+        Announce -> 1
+        LinkRequest -> 2
+        Proof -> 3
 
 unpack :: ByteString -> Either Rejection Packet
 unpack raw = case B.unpack (B.take 2 raw) of
@@ -173,9 +204,7 @@ unpack raw = case B.unpack (B.take 2 raw) of
             Just (contextByte', rest) ->
                 Right
                     Packet
-                        { flags = flagsByte
-                        , headerType = header
-                        , contextFlag = testBit flagsByte 5
+                        { contextFlag = testBit flagsByte 5
                         , transportType =
                             if testBit flagsByte 4 then Transport else Broadcast
                         , destinationType = destinationTypeOf flagsByte
@@ -194,6 +223,16 @@ unpack raw = case B.unpack (B.take 2 raw) of
             Header1 -> 2
             Header2 -> 2 + addressLength
     _ -> Left (ShortHeader (B.length raw) 2)
+
+pack :: Packet -> ByteString
+pack value =
+    B.concat
+        [ B.pack [flags value, hops value]
+        , fromMaybe B.empty (transportId value)
+        , address value
+        , B.singleton (contextByte (context value))
+        , payload value
+        ]
 
 -- | A resource takes care of its own encryption, a keepalive carries no
 -- data, and the three other kinds of packet are read before a key is
