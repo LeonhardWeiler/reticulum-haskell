@@ -651,6 +651,13 @@ encode kind fields = case kind of
     "plain" -> Just (rebuilt [] (part fields "plaintext"))
     "announce" -> Just (rebuilt [] (announced fields))
     "pathrequest" -> Just (rebuilt [] (asking fields))
+    "group" -> Just (rebuilt ["group_key"] (Token.pack <$> sealed fields))
+    "encrypted" ->
+        Just
+            ( rebuilt
+                ["recipient_private", "ratchet_private"]
+                (Encryption.pack <$> (Encryption.Encrypted <$> part fields "ephemeral_public" <*> sealed fields))
+            )
     _ -> Nothing
   where
     echoed = mapM (written fields)
@@ -659,6 +666,13 @@ encode kind fields = case kind of
         first <- echoed echoes
         built <- packed fields =<< body
         pure (first ++ [hex built])
+
+sealed :: Fields -> Either String Token.Token
+sealed fields =
+    Token.Token
+        <$> part fields "iv"
+        <*> part fields "ciphertext"
+        <*> part fields "hmac"
 
 announced :: Fields -> Either String ByteString
 announced fields = do

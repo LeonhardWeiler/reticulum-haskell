@@ -3,6 +3,7 @@
 module Reticulum.Token
     ( Token (..)
     , token
+    , pack
     , Keys (..)
     , keys
     , hmacValid
@@ -57,6 +58,9 @@ token payload
                 }
   where
     length' = B.length payload
+
+pack :: Token -> ByteString
+pack value = B.concat [iv value, ciphertext value, hmac value]
 
 keys :: ByteString -> Keys
 keys derived = Keys (B.take half derived) (B.drop half derived)

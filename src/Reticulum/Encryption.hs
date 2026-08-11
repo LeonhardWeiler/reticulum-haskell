@@ -3,6 +3,7 @@
 module Reticulum.Encryption
     ( Encrypted (..)
     , encrypted
+    , pack
     , shared
     , derive
     , publicPoint
@@ -41,6 +42,9 @@ encrypted payload
             <$> Token.token (B.drop ephemeralLength payload)
   where
     needed = ephemeralLength + Token.tokenOverhead
+
+pack :: Encrypted -> ByteString
+pack value = ephemeralPublic value <> Token.pack (token value)
 
 -- | An agreement against a point of small order is all zeroes, which
 -- neither end contributed to and every reader of the announce can
