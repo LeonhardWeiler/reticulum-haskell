@@ -58,10 +58,9 @@ Layout
     DEPENDS            every dependency past base and the crypto library,
                        and what needs it
 
-The library names the reference by symbol, never by line number:
-
-    Reticulum.Identity    RNS/Identity.py
-                          RNS/Identity.py#truncated_hash
+The library cites neither the reference nor the corpus. A module is
+named for what it holds, and where the bytes come from is a question
+this file and the corpus answer, not a header on every function.
 
 
 The harness
