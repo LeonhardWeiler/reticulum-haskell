@@ -4,10 +4,12 @@
 module Reticulum.Resource
     ( Advertisement (..)
     , advertisement
+    , packAdvertisement
     , PartRequest (..)
     , partRequest
     , Update (..)
     , update
+    , packUpdate
     , cancel
     , Proof (..)
     , proof
@@ -19,13 +21,18 @@ module Reticulum.Resource
     , extend
     , whole
     , proving
+    , Giving (..)
+    , giving
+    , advertised
+    , handing
+    , concluded
     , hashLength
     , mapHashLength
     , randomHashLength
     , proofLength
     ) where
 
-import Data.Bits (testBit)
+import Data.Bits (testBit, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.Map.Strict (Map)
@@ -98,6 +105,29 @@ advertisement plain
         Just (Msgpack.Bytes bytes) -> Just bytes
         _ -> Nothing
 
+-- | The keys are written in the order the reference writes them, and a
+-- field it has nothing for is nil and not left out.
+packAdvertisement :: Advertisement -> ByteString
+packAdvertisement value =
+    Msgpack.pack
+        ( Msgpack.Map
+            [ (Msgpack.Text "t", number (transferSize value))
+            , (Msgpack.Text "d", number (dataSize value))
+            , (Msgpack.Text "n", number (parts value))
+            , (Msgpack.Text "h", binary (resourceHash value))
+            , (Msgpack.Text "r", binary (randomHash value))
+            , (Msgpack.Text "o", binary (originalHash value))
+            , (Msgpack.Text "i", number (segmentIndex value))
+            , (Msgpack.Text "l", number (totalSegments value))
+            , (Msgpack.Text "q", binary (requestId value))
+            , (Msgpack.Text "f", number (fromIntegral <$> flags value))
+            , (Msgpack.Text "m", binary (hashmap value))
+            ]
+        )
+  where
+    number = maybe Msgpack.Nil Msgpack.Unsigned
+    binary = maybe Msgpack.Nil Msgpack.Bytes
+
 data PartRequest = PartRequest
     { exhausted :: Bool
     , lastMapHash :: Maybe ByteString
@@ -150,6 +180,16 @@ update plain
     needed = hashLength + 1
     packed = Msgpack.unpack (B.drop hashLength plain)
 
+packUpdate :: Update -> ByteString
+packUpdate value =
+    updatedResource value
+        <> Msgpack.pack
+            ( Msgpack.Array
+                [ maybe Msgpack.Nil Msgpack.Unsigned (updateSegment value)
+                , maybe Msgpack.Nil Msgpack.Bytes (updateHashmap value)
+                ]
+            )
+
 cancel :: ByteString -> ByteString
 cancel = B.take hashLength
 
@@ -194,24 +234,24 @@ window = 4
 -- | The parts are as many as the transfer size divided by what one of
 -- them carries, and an advertisement that names neither is none.
 taking :: Int -> Advertisement -> Maybe Taking
-taking size advertised = do
-    hash <- resourceHash advertised
-    salt <- randomHash advertised
-    carried <- transferSize advertised
-    flagged <- flags advertised
+taking size told = do
+    hash <- resourceHash told
+    entropy' <- randomHash told
+    carried <- transferSize told
+    flagged' <- flags told
     Just
         Taking
             { resource = hash
-            , original = fromMaybe hash (originalHash advertised)
-            , entropy = salt
-            , index = fromMaybe 1 (segmentIndex advertised)
-            , segments = fromMaybe 1 (totalSegments advertised)
-            , identifier = requestId advertised
-            , asked = testBit flagged 3
-            , compressed = testBit flagged 1
-            , covered = testBit flagged 0
-            , prefixed = testBit flagged 5
-            , hashes = mapped (fromMaybe B.empty (hashmap advertised))
+            , original = fromMaybe hash (originalHash told)
+            , entropy = entropy'
+            , index = fromMaybe 1 (segmentIndex told)
+            , segments = fromMaybe 1 (totalSegments told)
+            , identifier = requestId told
+            , asked = testBit flagged' 3
+            , compressed = testBit flagged' 1
+            , covered = testBit flagged' 0
+            , prefixed = testBit flagged' 5
+            , hashes = mapped (fromMaybe B.empty (hashmap told))
             , gathered = Map.empty
             , pieces = ceiling (fromIntegral carried / fromIntegral size :: Double)
             , outstanding = 0
@@ -258,9 +298,12 @@ part raw value = case [place | place <- places, Map.lookup place (hashes value) 
                 }
     _ -> value
   where
-    carried = B.take mapHashLength (Identity.fullHash (raw <> entropy value))
+    carried = mark (entropy value) raw
     reached = length (takeWhile (`Map.member` gathered value) [0 ..])
     places = take window [reached .. pieces value - 1]
+
+mark :: ByteString -> ByteString -> ByteString
+mark salt' raw = B.take mapHashLength (Identity.fullHash (raw <> salt'))
 
 extend :: Update -> Taking -> Taking
 extend told value = case updateHashmap told of
@@ -270,11 +313,11 @@ extend told value = case updateHashmap told of
             { hashes = Map.union (hashes value) (Map.mapKeys (+ from) (mapped more))
             }
   where
-    from = maybe 0 (fromIntegral . (* hashmapSegment)) (updateSegment told)
+    from = maybe 0 ((* hashmapSegment) . fromIntegral) (updateSegment told)
 
 -- | An advertisement carries as many hashes as fit beside its own
 -- fields, and every update after it carries that many again.
-hashmapSegment :: Word64
+hashmapSegment :: Int
 hashmapSegment = 74
 
 whole :: Taking -> Maybe ByteString
@@ -285,3 +328,105 @@ whole value
 proving :: ByteString -> Taking -> ByteString
 proving assembled value =
     resource value <> Identity.fullHash (assembled <> resource value)
+
+-- | A resource being handed over: the sealed stream cut into parts, the
+-- hash each part is known by, and the proof that ends it.
+data Giving = Giving
+    { given :: ByteString
+    , salt :: ByteString
+    , cut :: [ByteString]
+    , marks :: [ByteString]
+    , awaited :: ByteString
+    , measure :: Int
+    , squeezed :: Bool
+    , answers :: Maybe (ByteString, Bool)
+    , least :: Int
+    }
+
+-- | Both hashes are over the data, and neither is over what is sent:
+-- the stream that goes out is compressed and sealed, and the far end
+-- proves what it got back out of it.
+giving :: Int -> ByteString -> ByteString -> ByteString -> Bool -> Maybe (ByteString, Bool) -> Giving
+giving size salt' body stream compressed' asking =
+    Giving
+        { given = hash
+        , salt = salt'
+        , cut = chunks size stream
+        , marks = map (mark salt') (chunks size stream)
+        , awaited = Identity.fullHash (body <> hash)
+        , measure = B.length body
+        , squeezed = compressed'
+        , answers = asking
+        , least = 0
+        }
+  where
+    hash = Identity.fullHash (body <> salt')
+
+chunks :: Int -> ByteString -> [ByteString]
+chunks size bytes
+    | B.null bytes = []
+    | otherwise = B.take size bytes : chunks size (B.drop size bytes)
+
+advertised :: Giving -> Advertisement
+advertised value =
+    Advertisement
+        { transferSize = Just (fromIntegral (sum (map B.length (cut value))))
+        , dataSize = Just (fromIntegral (measure value))
+        , parts = Just (fromIntegral (length (cut value)))
+        , resourceHash = Just (given value)
+        , randomHash = Just (salt value)
+        , originalHash = Just (given value)
+        , segmentIndex = Just 1
+        , totalSegments = Just 1
+        , requestId = fst <$> answers value
+        , flags = Just (flagged value)
+        , hashmap = Just (B.concat (take hashmapSegment (marks value)))
+        }
+
+-- | The stream is always sealed and never split, and the two bits that
+-- say which way a request is going are the same bit read twice.
+flagged :: Giving -> Word8
+flagged value =
+    1
+        .|. (if squeezed value then 2 else 0)
+        .|. (case answers value of Just (_, False) -> 8; _ -> 0)
+        .|. (case answers value of Just (_, True) -> 16; _ -> 0)
+
+-- | The window of parts a request can name is bounded, so a hash named
+-- outside it is one this end no longer holds.
+collisionGuard :: Int
+collisionGuard = 2 * windowMax + hashmapSegment
+
+windowMax :: Int
+windowMax = 75
+
+-- | What a part request asks for, and the next segment of the hashmap
+-- when the far end says it has run out of the one it has.
+handing :: PartRequest -> Giving -> ([ByteString], Maybe Update, Giving)
+handing wanted value
+    | exhausted wanted = (sending, Just told, value {least = max (reached - 1 - windowMax) 0})
+    | otherwise = (sending, Nothing, value)
+  where
+    scope = take collisionGuard (drop (least value) (zip (marks value) (cut value)))
+    named = chunks mapHashLength (requestedHashes wanted)
+    sending = [piece | (hash, piece) <- scope, hash `elem` named]
+    reached =
+        least value
+            + case break ((== lastMapHash wanted) . Just . fst) scope of
+                (before, []) -> length before
+                (before, _) -> length before + 1
+    segment = reached `div` hashmapSegment
+    told =
+        Update
+            { updatedResource = given value
+            , updateSegment = Just (fromIntegral segment)
+            , updateHashmap =
+                Just
+                    ( B.concat
+                        (take hashmapSegment (drop (segment * hashmapSegment) (marks value)))
+                    )
+            }
+
+concluded :: Proof -> Giving -> Bool
+concluded written value =
+    provedResource written == given value && dataHash written == awaited value

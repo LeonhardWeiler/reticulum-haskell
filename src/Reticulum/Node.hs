@@ -16,6 +16,7 @@ module Reticulum.Node
     , open
     , speak
     , ask
+    , hand
     , announce
     , requestPath
     , paths
@@ -106,6 +107,7 @@ data Session = Session
     , answering :: Answering
     , identified :: Maybe Identity.PublicKey
     , taking :: Map ByteString Resource.Taking
+    , handing :: Map ByteString Resource.Giving
     , gathering :: Map ByteString ByteString
     }
 
@@ -254,6 +256,7 @@ opening node through held packet = case Link.request (Packet.payload packet) of
             , answering = answers held
             , identified = Nothing
             , taking = Map.empty
+            , handing = Map.empty
             , gathering = Map.empty
             }
     written body =
@@ -283,11 +286,15 @@ spoken node through session packet
         modifyMVar_ (sessions node) (pure . Map.adjust (\held -> held {since = now}) link)
         case Packet.packetType packet of
             Packet.Data -> data'
-            Packet.Proof -> when (Packet.context packet == Packet.None) witnessed
+            Packet.Proof -> proof'
             _ -> pure ()
   where
     link = Packet.address packet
     opened = Link.opened (keys session)
+    proof' = case Packet.context packet of
+        Packet.None -> witnessed
+        Packet.ResourcePrf -> handed
+        _ -> pure ()
     data' = case Packet.context packet of
         Packet.Keepalive -> when (Packet.payload packet == B.singleton alive) awakening
         Packet.None -> mapM_ took (opened (Packet.payload packet))
@@ -296,6 +303,7 @@ spoken node through session packet
         Packet.Request -> mapM_ (asking session packet) (opened (Packet.payload packet))
         Packet.Response -> mapM_ given (opened (Packet.payload packet))
         Packet.ResourceAdv -> mapM_ (advertised node session link) (opened (Packet.payload packet))
+        Packet.ResourceReq -> mapM_ (giving node session link) (opened (Packet.payload packet))
         Packet.Resource -> piece node session link (Packet.payload packet)
         Packet.ResourceHmu -> mapM_ (updated node session link) (opened (Packet.payload packet))
         Packet.ResourceIcl -> mapM_ (forgotten node link) (opened (Packet.payload packet))
@@ -316,6 +324,18 @@ spoken node through session packet
             , Just body <- Request.responseBody back ->
                 answered (answering session) identifier body
         _ -> pure ()
+    handed = case Resource.proof (Packet.payload packet) of
+        Left _ -> pure ()
+        Right written -> do
+            done <- modifyMVar (sessions node) (pure . dropping written)
+            when done (proved (answering session) (Resource.provedResource written))
+    dropping written running = case Map.lookup link running of
+        Just held
+            | Just gone <- Map.lookup (Resource.provedResource written) (handing held) ->
+                ( Map.insert link held {handing = Map.delete (Resource.given gone) (handing held)} running
+                , Resource.concluded written gone
+                )
+        _ -> (running, False)
     names plain = case Link.identify plain of
         Just who
             | Link.identifyValid link who ->
@@ -498,6 +518,56 @@ concluded node session link held body
     given whole = case (Resource.asked held, Resource.identifier held) of
         (True, Just identifier) -> served session link identifier whole
         _ -> assembled (answering session) whole
+
+-- | The parts go out as they were cut, because the stream they came
+-- from was sealed whole and one of them alone opens nothing.
+giving :: Node -> Session -> ByteString -> ByteString -> IO ()
+giving node session link plain = case Resource.partRequest plain of
+    Left _ -> pure ()
+    Right wanted -> do
+        outcome <- modifyMVar (sessions node) (pure . stepped wanted)
+        case outcome of
+            Nothing -> pure ()
+            Just (cut, told) -> do
+                mapM_ (transmit (at session) . Packet.pack . onLink link Packet.Data Packet.Resource) cut
+                mapM_ (void . sending session link Packet.ResourceHmu . Resource.packUpdate) told
+  where
+    stepped wanted running = case held running wanted of
+        Nothing -> (running, Nothing)
+        Just kept ->
+            let (cut, told, after) = Resource.handing wanted kept
+             in (Map.adjust (put after) link running, Just (cut, told))
+    held running wanted =
+        Map.lookup link running >>= Map.lookup (Resource.requestedResource wanted) . handing
+    put after session' =
+        session' {handing = Map.insert (Resource.given after) after (handing session')}
+
+-- | The data is compressed when that is shorter, and what the far end
+-- proves is the data and not the stream that carried it.
+hand :: Node -> ByteString -> ByteString -> IO (Maybe ByteString)
+hand node link body = do
+    running <- readMVar (sessions node)
+    case Map.lookup link running of
+        Nothing -> pure Nothing
+        Just session -> do
+            salt <- Entropy.getEntropy Resource.randomHashLength
+            vector <- Entropy.getEntropy Token.blockSize
+            case Link.sealed (keys session) vector (salt <> carried) of
+                Nothing -> Nothing <$ hPutStrLn stderr "resource: nothing was sealed"
+                Just stream -> do
+                    let kept = made session salt stream
+                    modifyMVar_ (sessions node) (pure . Map.adjust (keeping kept) link)
+                    _ <- sending session link Packet.ResourceAdv (advertisement kept)
+                    pure (Just (Resource.given kept))
+  where
+    packed = Lazy.toStrict (BZip.compress (Lazy.fromStrict body))
+    shorter = B.length packed < B.length body
+    carried = if shorter then packed else body
+    made session salt stream =
+        Resource.giving (Link.partSize (unit session)) salt body stream shorter Nothing
+    advertisement = Resource.packAdvertisement . Resource.advertised
+    keeping kept session' =
+        session' {handing = Map.insert (Resource.given kept) kept (handing session')}
 
 -- | A proof on a link carries the hash it proves, which one from a
 -- destination does not.
@@ -777,6 +847,7 @@ proven node through wanted packet
             , answering = hearing wanted
             , identified = Nothing
             , taking = Map.empty
+            , handing = Map.empty
             , gathering = Map.empty
             }
 

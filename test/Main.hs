@@ -50,6 +50,8 @@ checks =
     , ("a link this node answers takes what crosses it and proves it", linkAnswered)
     , ("a link this node opens carries what it says and is proved back", linkOpened)
     , ("a request this node sends is answered under the id it named", requestSent)
+    , ("a resource this node hands over arrives whole and is proved", resourceGiven 3000)
+    , ("a resource past one hashmap is handed the rest of it", resourceGiven 60000)
     , ("a request on a link is answered on the path it names", requestAnswered)
     , ("a resource is taken in parts and proved", resourceTaken False)
     , ("a resource that is compressed is taken", resourceTaken True)
@@ -739,6 +741,36 @@ requestSent = do
   where
     echo = C.pack "echo"
     path = Request.named echo
+
+-- | Both ends this node's own: the resource one hands over, the parts
+-- the other asks for, and the proof that comes back for the whole.
+resourceGiven :: Int -> IO (Either String ())
+resourceGiven size = do
+    took <- newIORef []
+    (near, emitter) <- twoNodes quiet {Node.assembled = keeping took}
+    found <- waitFor (reached near emitter)
+    case found of
+        Nothing -> pure (Left "the announce did not arrive")
+        Just _ -> do
+            proofs <- newIORef []
+            opened <-
+                Node.open
+                    near
+                    (Destination.DestinationHash (addressOf emitter))
+                    quiet {Node.proved = keeping proofs}
+            case opened of
+                Left reason -> pure (Left reason)
+                Right link -> do
+                    handed <- waitFor (Node.hand near link body)
+                    arrived <- gathered took
+                    proved <- gathered proofs
+                    pure $ do
+                        require "the resource did not go" (isJust handed)
+                        expect "what the far end took" [body] arrived
+                        expect "the resource the proof named" (maybe [] pure handed) proved
+  where
+    body = B.take size (B.concat (take (size `div` Identity.truncatedHashLength + 1) grains))
+    grains = iterate Identity.fullHash (C.pack "the resource this node hands over")
 
 -- | One node that holds a destination and announces it, and one that
 -- has heard it.
