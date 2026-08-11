@@ -209,16 +209,15 @@ checkout is not committed.
 
 # Open
 
-Every kind the corpus holds passes, in both directions, and a node on
-one TCP interface hears the reference and is heard by it. What the
-corpus cannot measure is what is left:
+Every kind the corpus holds passes, in both directions, and a transport
+node carries what two reference nodes say to each other: an announce, a
+path request answered from what it kept, a packet and its proof, and a
+link opened across it. What the corpus cannot measure is what is left:
 
-    the transport node     forwarding, the announce table, path
-                           requests, more than one interface
-    the layers above       what a node does with a packet that is not
-                           an announce
+    the layers above       what a node does with a packet addressed to
+                           a destination of its own: a link it answers,
+                           a resource it takes, a request it serves
 
-And the questions that were open before it:
+And the question that was open before it:
 
     Whether harness lives here or in the corpus under conformance/.
-    Whether tests that start the reference belong here at all.

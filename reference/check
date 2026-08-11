@@ -1,0 +1,98 @@
+#!/bin/sh
+#
+# reference/check - this node between two python-rns nodes.
+#
+# Neither side can reach the other except through the node built here,
+# and every line printed is one of them saying it got there. Needs
+# python-rns importable and takes about two minutes.
+#
+# The corpus is what says compatible. This says the node speaks.
+
+set -e
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+left=42021
+right=42022
+announce_after=12
+
+work=$(mktemp -d)
+running=
+
+cleanup() {
+	[ -z "$running" ] || kill $running 2>/dev/null || true
+	rm -rf "$work"
+}
+trap cleanup EXIT INT TERM
+
+python3 -c 'import RNS' 2>/dev/null || {
+	echo "python-rns is not importable" >&2
+	exit 2
+}
+
+cabal build --verbose=0 --project-dir="$root" exe:node >&2
+node=$(cabal list-bin --verbose=0 --project-dir="$root" exe:node)
+
+instance() {
+	mkdir -p "$work/$1"
+	cat > "$work/$1/config" <<EOF
+[reticulum]
+  enable_transport = No
+  share_instance = No
+  instance_name = $1
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 3
+
+[interfaces]
+  [[$1 tcp]]
+    type = TCPServerInterface
+    interface_enabled = True
+    listen_ip = 127.0.0.1
+    listen_port = $2
+EOF
+}
+
+instance far $left
+instance near $right
+
+python3 "$root/reference/announce.py" "$work/far" "$announce_after" \
+	> "$work/far.out" 2> "$work/far.err" &
+running="$running $!"
+
+# Both sides are dialled: the far one is up, the near one is not, and
+# the node keeps knocking until it is.
+sleep 2
+"$node" -t -k "$work/node.key" 127.0.0.1:$left 127.0.0.1:$right \
+	> "$work/node.out" 2> "$work/node.err" &
+running="$running $!"
+
+sleep $((announce_after + 12))
+destination=$(head -1 "$work/far.out")
+
+python3 "$root/reference/ask.py" "$work/near" "$destination" \
+	> "$work/near.out" 2> "$work/near.err" &
+running="$running $!"
+sleep 60
+
+passed=0
+failed=0
+
+says() {
+	if grep -q -- "$2" "$work/$1"; then
+		passed=$((passed + 1))
+	else
+		failed=$((failed + 1))
+		echo "not in $1: $2" >&2
+	fi
+}
+
+says node.out "$destination 1 hops on"
+says near.out "has path before asking: False"
+says near.out "has path: True hops: 2"
+says near.out "packet proved: True"
+says near.out "link active: True"
+says far.out "heard on the link: over the link"
+
+echo "$passed passed, $failed failed"
+[ "$failed" -eq 0 ]

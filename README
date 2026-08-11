@@ -54,6 +54,7 @@ Layout
     cmd/harness/       the corpus harness, linked to ./harness by check
     cmd/node/          a node on TCP interfaces, dialled and answered
     test/              what the corpus cannot hold
+    reference/         this node between two python-rns nodes
     .github/workflows/ one job, and it runs ./check
     CLAUDE.md          the rules this repository is written under
     CORPUS             the pin
@@ -114,9 +115,18 @@ Tests
 
 There are none here that a vector already proves. What belongs here is
 what the corpus cannot hold: properties, and the layers above link.
-Today that is the transport node: the rules the announce table follows,
-and nodes wired to each other in memory, one carrying what another
-announced.
+Today that is the transport node: the rules its tables follow, and
+nodes wired to each other in memory, one carrying what another
+announced, opening a link across it and proving what crossed.
+
+    ./reference/check
+
+is the same node between two python-rns nodes that cannot reach each
+other any other way. It needs python-rns importable, takes about two
+minutes, and is not run in CI. Six lines are checked: this node hears
+the announce, the far side has no path and then has one two hops away,
+a packet across it is proved, a link opens, and what is said over that
+link arrives.
 
 
 License
