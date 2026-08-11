@@ -157,19 +157,21 @@ own to send a request and hand a resource over.
 is the same node between two python-rns nodes that cannot reach each
 other any other way, a third that talks to the node itself, and a
 fourth the node talks to. It needs python-rns importable, takes about
-three minutes, and is not run in CI. Twenty-seven lines are checked.
+three minutes, and is not run in CI. Thirty-one lines are checked.
 Through the node: it hears the announce, the far side has no path and
 then has one two hops away, a packet across it is proved, a link opens,
 and what is said over that link arrives. To the node: a path it answers
 for itself, a packet it proves, a link it answers, a packet on that
 link it proves, a request it serves, a request too long for one packet
 that arrives as a resource and is answered from it, an answer as long
-as what was asked that goes back as one, a resource it takes whole, and
-the close that ends the link, which it takes as the end of it. From the
-node: a link it opens, a packet on it that is proved, an answer to a
-request it sent, a request of its own too long for one packet, a
-resource it hands over and sees proved, and the close it writes when
-there is nothing left to say, which the far side takes as the end.
+as what was asked that goes back as one, a resource it takes whole, one
+past a segment that it takes as two and answers as one, and the close
+that ends the link, which it takes as the end of it. From the node: a
+link it opens, a packet on it that is proved, an answer to a request it
+sent, a request of its own too long for one packet, a resource it hands
+over and sees proved, one past a segment that goes over as two, and the
+close it writes when there is nothing left to say, which the far side
+takes as the end.
 
 
 License

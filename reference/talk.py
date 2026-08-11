@@ -1,6 +1,7 @@
 """The side that talks to the node itself: a path it asks for, a packet
-it proves, a link it answers, the requests it serves, a resource it
-takes in, and the close it writes at the end."""
+it proves, a link it answers, the requests it serves, the resources it
+takes in, one of them longer than a segment, and the close it writes at
+the end."""
 
 import os
 import sys
@@ -95,6 +96,15 @@ for _ in range(60):
     if concluded:
         break
 print("resource concluded:", bool(concluded), flush=True)
+
+# Longer than one segment, so it goes over as two resources under the
+# hash of the first.
+RNS.Resource(os.urandom(1049575), link, callback=lambda resource: concluded.append(resource))
+for _ in range(240):
+    time.sleep(0.5)
+    if len(concluded) > 1:
+        break
+print("long resource concluded:", len(concluded) > 1, flush=True)
 
 link.teardown()
 time.sleep(2)

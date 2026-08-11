@@ -23,6 +23,7 @@ import qualified Reticulum.Node as Node
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Path as Path
 import qualified Reticulum.Request as Request
+import qualified Reticulum.Resource as Resource
 
 data Options = Options
     { forwarding :: Bool
@@ -138,11 +139,12 @@ announcing node name = do
 talking :: Node.Node -> ByteString -> IO ()
 talking node wanted = do
     named <- newIORef Map.empty
+    shown <- newIORef []
     found <- waitFor (asked node destination)
     case found of
         Nothing -> hPutStrLn stderr "no path to the destination to dial"
         Just _ -> do
-            outcome <- Node.open node destination (hears named)
+            outcome <- Node.open node destination (hears named shown)
             case outcome of
                 Left reason -> hPutStrLn stderr reason
                 Right link -> do
@@ -155,13 +157,25 @@ talking node wanted = do
                     threadDelay pause
                     given <- Node.hand node link (grain 3000)
                     remember named given "resource"
-                    threadDelay pause
+                    _ <- waitFor (awaiting shown given)
+                    long <- Node.hand node link (grain (Resource.maxSegmentSize + 1000))
+                    remember named long "long resource"
+                    _ <- waitFor (awaiting shown long)
                     Node.close node link
                     putStrLn "closed the link"
   where
     destination = Destination.DestinationHash wanted
     remember named held label =
         mapM_ (\hash -> atomicModifyIORef' named (\kept -> (Map.insert hash label kept, ()))) held
+
+-- | The next resource waits for the proof of the one before it, so that
+-- the link is not closed under either of them.
+awaiting :: IORef [ByteString] -> Maybe ByteString -> IO (Maybe ())
+awaiting shown wanted = case wanted of
+    Nothing -> pure (Just ())
+    Just hash -> do
+        held <- readIORef shown
+        pure (if hash `elem` held then Just () else Nothing)
 
 -- | The path is asked for again on every round, because the node the
 -- answer has to come through may not be dialled yet.
@@ -171,13 +185,14 @@ asked node destination = do
     threadDelay (1000 * 1000)
     Map.lookup destination <$> Node.paths node
 
-hears :: IORef (Map.Map ByteString String) -> Node.Answering
-hears named =
+hears :: IORef (Map.Map ByteString String) -> IORef [ByteString] -> Node.Answering
+hears named shown =
     Node.Answering
         { Node.delivered = \plain -> putStrLn (unwords ["took", show plain])
         , Node.assembled = \plain -> putStrLn (unwords ["assembled", show (B.length plain), "bytes"])
         , Node.requested = Map.empty
         , Node.proved = \hash -> do
+            atomicModifyIORef' shown (\kept -> (hash : kept, ()))
             labels <- readIORef named
             putStrLn (unwords [fromMaybe (hex hash) (Map.lookup hash labels), "proved"])
         , Node.answered = \_ body -> putStrLn (unwords ["answer", show body])
