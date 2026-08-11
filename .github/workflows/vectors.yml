@@ -18,6 +18,11 @@ jobs:
         with:
           extra_nix_config: experimental-features = nix-command flakes
 
+      # check builds the harness and nothing else, and the node is the
+      # other executable.
+      - name: Build
+        run: nix develop --command cabal build all
+
       # A step runs under bash -e without pipefail, and the exit status
       # of a pipeline is its last command's, so the verdict would
       # otherwise come from tee.
