@@ -11,6 +11,7 @@ module Reticulum.Resource
     , cancel
     , Proof (..)
     , proof
+    , packProof
     , hashLength
     , mapHashLength
     , proofLength
@@ -148,3 +149,6 @@ proof payload
     | B.length payload == proofLength =
         Right (Proof (B.take hashLength payload) (B.drop hashLength payload))
     | otherwise = Left (FixedLength (B.length payload) proofLength)
+
+packProof :: Proof -> ByteString
+packProof value = provedResource value <> dataHash value

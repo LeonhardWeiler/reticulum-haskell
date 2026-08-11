@@ -661,6 +661,20 @@ encode kind fields = case kind of
     "linkrequest" -> Just (rebuilt [] (requesting fields))
     "linkproof" -> Just (rebuilt ["link_request", "signer_public"] (proving fields))
     "linkdata" -> Just (rebuilt ["link_request", "responder_private"] (onLink fields))
+    "proof" ->
+        Just
+            ( rebuilt
+                ["proved_packet", "signer_public"]
+                (fmap Proof.pack (Proof.Proof <$> given fields "proof_hash" <*> part fields "signature"))
+            )
+    "resourceproof" ->
+        Just
+            ( rebuilt
+                ["advertised_hash"]
+                ( fmap Resource.packProof $
+                    Resource.Proof <$> part fields "resource_hash" <*> part fields "resource_proof"
+                )
+            )
     _ -> Nothing
   where
     echoed = mapM (written fields)
