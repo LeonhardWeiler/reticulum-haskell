@@ -219,6 +219,7 @@ data Taking = Taking
     , segments :: Word64
     , identifier :: Maybe ByteString
     , asked :: Bool
+    , replied :: Bool
     , compressed :: Bool
     , covered :: Bool
     , prefixed :: Bool
@@ -248,6 +249,7 @@ taking size told = do
             , segments = fromMaybe 1 (totalSegments told)
             , identifier = requestId told
             , asked = testBit flagged' 3
+            , replied = testBit flagged' 4
             , compressed = testBit flagged' 1
             , covered = testBit flagged' 0
             , prefixed = testBit flagged' 5

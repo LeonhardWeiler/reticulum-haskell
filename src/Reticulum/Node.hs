@@ -293,14 +293,14 @@ spoken node through session packet
     opened = Link.opened (keys session)
     proof' = case Packet.context packet of
         Packet.None -> witnessed
-        Packet.ResourcePrf -> handed
+        Packet.ResourcePrf -> ended
         _ -> pure ()
     data' = case Packet.context packet of
         Packet.Keepalive -> when (Packet.payload packet == B.singleton alive) awakening
         Packet.None -> mapM_ took (opened (Packet.payload packet))
         Packet.LinkIdentify -> mapM_ names (opened (Packet.payload packet))
         Packet.LinkClose -> mapM_ closes (opened (Packet.payload packet))
-        Packet.Request -> mapM_ (asking session packet) (opened (Packet.payload packet))
+        Packet.Request -> mapM_ (asking node session packet) (opened (Packet.payload packet))
         Packet.Response -> mapM_ given (opened (Packet.payload packet))
         Packet.ResourceAdv -> mapM_ (advertised node session link) (opened (Packet.payload packet))
         Packet.ResourceReq -> mapM_ (giving node session link) (opened (Packet.payload packet))
@@ -324,7 +324,7 @@ spoken node through session packet
             , Just body <- Request.responseBody back ->
                 answered (answering session) identifier body
         _ -> pure ()
-    handed = case Resource.proof (Packet.payload packet) of
+    ended = case Resource.proof (Packet.payload packet) of
         Left _ -> pure ()
         Right written -> do
             done <- modifyMVar (sessions node) (pure . dropping written)
@@ -354,28 +354,29 @@ awake :: ByteString
 awake = B.singleton 0xfe
 
 -- | The request is answered under the id of the packet that asked.
-asking :: Session -> Packet -> ByteString -> IO ()
-asking session packet =
-    served session (Packet.address packet) (Identity.truncatedHash (Packet.hashablePart packet))
+asking :: Node -> Session -> Packet -> ByteString -> IO ()
+asking node session packet =
+    served node session (Packet.address packet) (Identity.truncatedHash (Packet.hashablePart packet))
 
 -- | A path this destination does not serve is not answered at all.
-served :: Session -> ByteString -> ByteString -> ByteString -> IO ()
-served session link identifier plain = case Request.request plain of
+served :: Node -> Session -> ByteString -> ByteString -> ByteString -> IO ()
+served node session link identifier plain = case Request.request plain of
     Left _ -> pure ()
     Right wanted -> case serves =<< Request.pathHash wanted of
         Nothing -> pure ()
         Just handler -> do
             given <- handler (fromMaybe B.empty (Request.requestBody wanted))
-            mapM_ (responding session link identifier) given
+            mapM_ (responding node session link identifier) given
   where
     serves path = Map.lookup path (requested (answering session))
 
--- | An answer that does not fit in one packet on this link is not one
--- this node can send.
-responding :: Session -> ByteString -> ByteString -> ByteString -> IO ()
-responding session link identifier body
+-- | An answer that does not fit in one packet on this link is one the
+-- far end takes in as a resource, under the id of the request it
+-- answers.
+responding :: Node -> Session -> ByteString -> ByteString -> ByteString -> IO ()
+responding node session link identifier body
     | B.length packed > Link.capacity (unit session) =
-        hPutStrLn stderr ("response: " ++ show (B.length packed) ++ " bytes")
+        void (handed node link packed (Just (identifier, True)))
     | otherwise = void (sending session link Packet.Response packed)
   where
     packed = Request.packResponse identifier body
@@ -515,9 +516,14 @@ concluded node session link held body
             ( Map.insert link kept {gathering = Map.delete (Resource.original held) (gathering kept)} running
             , fromMaybe B.empty (Map.lookup (Resource.original held) (gathering kept))
             )
-    given whole = case (Resource.asked held, Resource.identifier held) of
-        (True, Just identifier) -> served session link identifier whole
+    given whole = case Resource.identifier held of
+        Just identifier
+            | Resource.asked held -> served node session link identifier whole
+            | Resource.replied held -> mapM_ (uncurry (answered (answering session))) (back whole)
         _ -> assembled (answering session) whole
+    back whole = case Request.response whole of
+        Left _ -> Nothing
+        Right taken' -> (,) <$> Request.requestId taken' <*> Request.responseBody taken'
 
 -- | The parts go out as they were cut, because the stream they came
 -- from was sealed whole and one of them alone opens nothing.
@@ -545,7 +551,10 @@ giving node session link plain = case Resource.partRequest plain of
 -- | The data is compressed when that is shorter, and what the far end
 -- proves is the data and not the stream that carried it.
 hand :: Node -> ByteString -> ByteString -> IO (Maybe ByteString)
-hand node link body = do
+hand node link body = handed node link body Nothing
+
+handed :: Node -> ByteString -> ByteString -> Maybe (ByteString, Bool) -> IO (Maybe ByteString)
+handed node link body asking' = do
     running <- readMVar (sessions node)
     case Map.lookup link running of
         Nothing -> pure Nothing
@@ -564,7 +573,7 @@ hand node link body = do
     shorter = B.length packed < B.length body
     carried = if shorter then packed else body
     made session salt stream =
-        Resource.giving (Link.partSize (unit session)) salt body stream shorter Nothing
+        Resource.giving (Link.partSize (unit session)) salt body stream shorter asking'
     advertisement = Resource.packAdvertisement . Resource.advertised
     keeping kept session' =
         session' {handing = Map.insert (Resource.given kept) kept (handing session')}
@@ -873,14 +882,17 @@ ask node link path body = do
     now <- clock
     case Map.lookup link running of
         Nothing -> pure Nothing
-        Just session -> asking' session (Request.packRequest (Path.seconds now) (Request.named path) body)
+        Just session ->
+            wanting' session (Request.packRequest (Path.seconds now) (Request.named path) body)
   where
-    asking' session packed
+    wanting' session packed
         | B.length packed > Link.capacity (unit session) =
-            Nothing <$ hPutStrLn stderr ("request: " ++ show (B.length packed) ++ " bytes")
+            Just identifier <$ handed node link packed (Just (identifier, False))
         | otherwise =
             fmap (Identity.truncatedHash . Packet.hashablePart)
                 <$> sending session link Packet.Request packed
+      where
+        identifier = Identity.truncatedHash packed
 
 announce :: Node -> DestinationHash -> IO ()
 announce node destination = do

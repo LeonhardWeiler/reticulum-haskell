@@ -49,7 +49,8 @@ checks =
     , ("a packet sealed for another key is not taken", notOpened)
     , ("a link this node answers takes what crosses it and proves it", linkAnswered)
     , ("a link this node opens carries what it says and is proved back", linkOpened)
-    , ("a request this node sends is answered under the id it named", requestSent)
+    , ("a request this node sends is answered under the id it named", requestSent 11)
+    , ("a request too long for one packet goes as a resource", requestSent 4000)
     , ("a resource this node hands over arrives whole and is proved", resourceGiven 3000)
     , ("a resource past one hashmap is handed the rest of it", resourceGiven 60000)
     , ("a request on a link is answered on the path it names", requestAnswered)
@@ -714,8 +715,8 @@ linkOpened = do
 -- | Both ends this node's own: the request one sends, the path the
 -- other serves, and the answer filed under the id of the packet that
 -- asked.
-requestSent :: IO (Either String ())
-requestSent = do
+requestSent :: Int -> IO (Either String ())
+requestSent size = do
     (near, emitter) <- twoNodes quiet {Node.requested = Map.singleton path (pure . Just . B.reverse)}
     found <- waitFor (reached near emitter)
     case found of
@@ -726,21 +727,22 @@ requestSent = do
                 Node.open
                     near
                     (Destination.DestinationHash (addressOf emitter))
-                    quiet {Node.answered = \named body -> keeping answers (named, body)}
+                    quiet {Node.answered = \named given -> keeping answers (named, given)}
             case opened of
                 Left reason -> pure (Left reason)
                 Right link -> do
-                    sent <- waitFor (Node.ask near link echo spoken)
+                    sent <- waitFor (Node.ask near link echo body)
                     given <- gathered answers
                     pure $ do
                         require "the request did not go" (isJust sent)
                         expect
                             "the answer and the id it names"
-                            [(fromMaybe B.empty sent, B.reverse spoken)]
+                            [(fromMaybe B.empty sent, B.reverse body)]
                             given
   where
     echo = C.pack "echo"
     path = Request.named echo
+    body = grain size
 
 -- | Both ends this node's own: the resource one hands over, the parts
 -- the other asks for, and the proof that comes back for the whole.
@@ -769,7 +771,13 @@ resourceGiven size = do
                         expect "what the far end took" [body] arrived
                         expect "the resource the proof named" (maybe [] pure handed) proved
   where
-    body = B.take size (B.concat (take (size `div` Identity.truncatedHashLength + 1) grains))
+    body = grain size
+
+-- | Bytes that do not compress, so what is sent is as long as what was
+-- asked for.
+grain :: Int -> ByteString
+grain size = B.take size (B.concat (take (size `div` Identity.hashLength + 1) grains))
+  where
     grains = iterate Identity.fullHash (C.pack "the resource this node hands over")
 
 -- | One node that holds a destination and announces it, and one that
