@@ -6,7 +6,10 @@ import Control.Monad (when)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
+import Data.Either (rights)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust, isNothing, listToMaybe)
 import Data.Word (Word8)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
@@ -37,6 +40,12 @@ checks =
     , ("a rebroadcast carries this node's transport id", pure carriedId)
     , ("a transport node carries an announce two hops", acrossTwoHops)
     , ("a node without the switch carries nothing", nothingCarried)
+    , ("a relayed packet names the next hop", pure relayedOn)
+    , ("the last hop drops the transport header", pure lastHop)
+    , ("a packet for another node is not relayed", pure notOurs)
+    , ("a proof goes back the way the packet came", pure backOut)
+    , ("a proof on the wrong interface goes nowhere", pure wrongWay)
+    , ("a packet crosses a transport node and its proof returns", throughTheMiddle)
     ]
 
 measure :: (String, IO (Either String ())) -> IO Bool
@@ -79,6 +88,71 @@ held = case Transport.queued (Time 0) 0 () (announced 1 Nothing) of
         Map.singleton
             (Destination.DestinationHash destination)
             entry {Transport.retries = 1, Transport.sendAt = Time 5}
+
+pathFor :: Word8 -> Path.Table ()
+pathFor away =
+    Map.singleton
+        (Destination.DestinationHash destination)
+        Path.Path
+            { Path.via = elsewhere
+            , Path.hops = away
+            , Path.updated = Time 0
+            , Path.expires = Time 100
+            , Path.blobs = []
+            , Path.state = Path.Unknown
+            , Path.announced = B.empty
+            , Path.interface = ()
+            }
+
+carriedTo :: ByteString -> Packet.Packet
+carriedTo hop = (announced 1 (Just hop)) {Packet.packetType = Packet.Data}
+
+proofFor :: Packet.Packet -> Packet.Packet
+proofFor sent =
+    (announced 0 Nothing)
+        { Packet.packetType = Packet.Proof
+        , Packet.address = B.take Packet.addressLength (Packet.packetHash sent)
+        , Packet.payload = B.replicate 64 0x44
+        }
+
+relayedOn :: Either String ()
+relayedOn = case Transport.relayed ours (pathFor 2) (carriedTo ours) of
+    Nothing -> Left "the packet was not relayed"
+    Just (_, onward) -> do
+        expect "the next hop" (Just elsewhere) (Packet.transportId onward)
+        require "the packet left transport" $
+            Packet.transportType onward == Packet.Transport
+
+lastHop :: Either String ()
+lastHop = case Transport.relayed ours (pathFor 1) (carriedTo ours) of
+    Nothing -> Left "the packet was not relayed"
+    Just (_, onward) -> do
+        expect "the transport id" Nothing (Packet.transportId onward)
+        require "the packet is still in transport" $
+            Packet.transportType onward == Packet.Broadcast
+
+notOurs :: Either String ()
+notOurs =
+    require "a packet naming another node was relayed" $
+        isNothing (Transport.relayed ours (pathFor 2) (carriedTo elsewhere))
+
+backOut :: Either String ()
+backOut = case Transport.returned 'b' (proofFor sent) kept of
+    (Nothing, _) -> Left "the proof found no way back"
+    (Just back, rest) -> do
+        expect "the way back" 'a' back
+        expect "the entries left" 0 (Map.size rest)
+  where
+    sent = carriedTo ours
+    kept = Transport.remember 'a' 'b' (Time 0) sent Map.empty
+
+wrongWay :: Either String ()
+wrongWay = case Transport.returned 'a' (proofFor sent) kept of
+    (Just _, _) -> Left "the proof came back the way it went out"
+    (Nothing, rest) -> expect "the entries left" 0 (Map.size rest)
+  where
+    sent = carriedTo ours
+    kept = Transport.remember 'a' 'b' (Time 0) sent Map.empty
 
 notQueued :: Either String ()
 notQueued =
@@ -131,24 +205,37 @@ carriedId = case Map.elems held of
             Packet.transportType packet == Packet.Transport
         require "the context is not none" (Packet.context packet == Packet.None)
     _ -> Left "the entry is not there"
-  where
-    ours = B.replicate Packet.addressLength 0x22
+
+ours :: ByteString
+ours = B.replicate Packet.addressLength 0x22
 
 elsewhere :: ByteString
 elsewhere = B.replicate Packet.addressLength 0x33
 
 -- | What one node writes the other reads, and each side is filed under
--- the interface it arrived on.
-wire :: String -> Node.Node -> Node.Node -> IO ()
-wire label left right = do
+-- the interface it arrived on; the two readers are what went each way.
+tap :: String -> Node.Node -> Node.Node -> IO (IO [ByteString], IO [ByteString])
+tap label left right = do
+    onward <- newIORef []
+    backward <- newIORef []
     here <- newEmptyMVar
     there <- newEmptyMVar
-    toward <- Node.interface label (\raw -> readMVar there >>= \at -> Node.inbound right at raw)
-    back <- Node.interface label (\raw -> readMVar here >>= \at -> Node.inbound left at raw)
+    toward <- Node.interface label $ \raw -> do
+        keep onward raw
+        readMVar there >>= \at -> Node.inbound right at raw
+    back <- Node.interface label $ \raw -> do
+        keep backward raw
+        readMVar here >>= \at -> Node.inbound left at raw
     putMVar here toward
     putMVar there back
     Node.attach left toward
     Node.attach right back
+    pure (readIORef onward, readIORef backward)
+  where
+    keep into raw = atomicModifyIORef' into (\kept -> (kept ++ [raw], ()))
+
+wire :: String -> Node.Node -> Node.Node -> IO ()
+wire label left right = () <$ tap label left right
 
 started :: Bool -> IO (Node.Node, Identity.IdentityHash)
 started forwarding = do
@@ -225,3 +312,48 @@ nothingCarried = do
             case found of
                 Nothing -> True
                 Just _ -> False
+
+awaited :: IO [ByteString] -> (Packet.Packet -> Bool) -> IO (Maybe Packet.Packet)
+awaited reader wanted = waitFor (found <$> reader)
+  where
+    found = listToMaybe . filter wanted . rights . map Packet.unpack
+
+addressOf :: Identity.IdentityHash -> ByteString
+addressOf emitter =
+    Destination.destinationHashBytes
+        (Destination.destinationHash (Destination.nameHash (Destination.name carried)) (Just emitter))
+
+message :: ByteString -> Packet.Packet
+message address =
+    (announced 0 Nothing)
+        { Packet.packetType = Packet.Data
+        , Packet.address = address
+        , Packet.payload = C.pack "one packet"
+        }
+
+throughTheMiddle :: IO (Either String ())
+throughTheMiddle = do
+    (near, _) <- started False
+    (middle, _) <- started True
+    (far, emitter) <- started False
+    (_, backToNear) <- tap "one" near middle
+    (towardFar, _) <- tap "two" middle far
+    Node.announce far (Destination.name carried) B.empty
+    known <- waitFor (reached near emitter)
+    outcome <- case known of
+        Nothing -> pure (Left "the path to the far node was not learned")
+        Just _ -> do
+            Node.send near (message (addressOf emitter))
+            passed <- awaited towardFar ((== Packet.Data) . Packet.packetType)
+            case passed of
+                Nothing -> pure (Left "the packet did not cross the node between")
+                Just onward -> do
+                    Node.send far (proofFor onward)
+                    back <- awaited backToNear ((== Packet.Proof) . Packet.packetType)
+                    pure $ do
+                        expect "the transport id on the last hop" Nothing (Packet.transportId onward)
+                        expect "the hops taken" 1 (Packet.hops onward)
+                        expect "what arrived" (C.pack "one packet") (Packet.payload onward)
+                        require "the proof did not come back" (isJust back)
+    Node.stop middle
+    pure outcome

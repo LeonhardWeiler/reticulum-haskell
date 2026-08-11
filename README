@@ -89,8 +89,10 @@ came on, and the app data. Given a name it announces that destination
 once, under the identity in the file, which is written if it is not
 there. Log lines go to standard error.
 
-With -t the node is a transport node and carries what it hears onward.
-Without it the node listens and forwards nothing.
+With -t the node is a transport node: it carries announces onward, and
+a packet naming it as the next hop goes on toward the destination its
+path table knows. A proof for such a packet goes back the way that
+packet came. Without -t the node listens and forwards nothing.
 
 The path table is what an announce leaves behind. A shorter path is
 taken only when it was emitted later than the one on file, and an

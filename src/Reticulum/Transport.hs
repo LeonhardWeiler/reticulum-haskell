@@ -11,6 +11,12 @@ module Reticulum.Transport
     , remembered
     , Route (..)
     , outbound
+    , relayed
+    , Return (..)
+    , Reverse
+    , remember
+    , returned
+    , forgotten
     , Pending (..)
     , Waiting
     , queued
@@ -134,6 +140,58 @@ outbound table packet
             { Packet.transportId = Just (Path.via path)
             , Packet.transportType = Packet.Transport
             }
+
+-- | The hop this node was named as, and the one written in its place:
+-- the last hop before the destination carries no transport id at all.
+relayed :: ByteString -> Path.Table i -> Packet -> Maybe (i, Packet)
+relayed ours table packet
+    | Packet.packetType packet == Packet.Announce = Nothing
+    | Packet.transportId packet /= Just ours = Nothing
+    | otherwise = onward <$> Map.lookup (DestinationHash (Packet.address packet)) table
+  where
+    onward path = (Path.interface path, carried path)
+    carried path
+        | Path.hops path > 1 = packet {Packet.transportId = Just (Path.via path)}
+        | Path.hops path == 1 =
+            packet
+                { Packet.transportId = Nothing
+                , Packet.transportType = Packet.Broadcast
+                }
+        | otherwise = packet
+
+data Return i = Return
+    { inward :: i
+    , outward :: i
+    , since :: Time
+    }
+
+type Reverse i = Map ByteString (Return i)
+
+reverseLifetime :: Double
+reverseLifetime = 8 * 60
+
+-- | A link request is answered along the link table and leaves nothing
+-- here.
+remember :: i -> i -> Time -> Packet -> Reverse i -> Reverse i
+remember from to now packet held
+    | Packet.packetType packet == Packet.LinkRequest = held
+    | otherwise = Map.insert (trace packet) (Return from to now) held
+
+-- | The proof carries half the hash of the packet it is for, and comes
+-- back on the interface that packet went out on or not at all.
+returned :: Eq i => i -> Packet -> Reverse i -> (Maybe i, Reverse i)
+returned through packet held = case Map.lookup (Packet.address packet) held of
+    Nothing -> (Nothing, held)
+    Just entry ->
+        ( if outward entry == through then Just (inward entry) else Nothing
+        , Map.delete (Packet.address packet) held
+        )
+
+forgotten :: Time -> Reverse i -> Reverse i
+forgotten now = Map.filter ((> seconds now) . (+ reverseLifetime) . seconds . since)
+
+trace :: Packet -> ByteString
+trace = B.take addressLength . Packet.packetHash
 
 retransmits :: Int
 retransmits = 1

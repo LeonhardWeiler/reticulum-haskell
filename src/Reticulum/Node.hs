@@ -3,7 +3,6 @@
 module Reticulum.Node
     ( Interface (name, transmit)
     , interface
-    , same
     , Settings (..)
     , Node
     , start
@@ -51,11 +50,11 @@ data Interface = Interface
     , token :: Unique
     }
 
+instance Eq Interface where
+    one == other = token one == token other
+
 interface :: String -> (ByteString -> IO ()) -> IO Interface
 interface named write = Interface named write <$> newUnique
-
-same :: Interface -> Interface -> Bool
-same one other = token one == token other
 
 data Settings = Settings
     { transport :: Bool
@@ -68,6 +67,7 @@ data Node = Node
     , attached :: MVar [Interface]
     , table :: MVar (Path.Table Interface)
     , waiting :: MVar (Transport.Waiting Interface)
+    , returns :: MVar (Transport.Reverse Interface)
     , seen :: MVar (Set ByteString)
     , local :: MVar (Set DestinationHash)
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
@@ -85,6 +85,7 @@ start how private handler = case Identity.toPublic private of
         node <-
             Node private (Identity.identityHashBytes (Identity.identityHash key)) how
                 <$> newMVar []
+                <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Set.empty
@@ -119,7 +120,10 @@ inbound node through raw
 taken :: Node -> Interface -> Packet -> IO ()
 taken node through packet = do
     allowed <- modifyMVar (seen node) (pure . filtered)
-    when (allowed && Packet.packetType packet == Packet.Announce) (announced node through packet)
+    when allowed $
+        if Packet.packetType packet == Packet.Announce
+            then announced node through packet
+            else forwarding node (relay node through packet)
   where
     filtered hashes
         | not verdict = (hashes, False)
@@ -173,6 +177,23 @@ queue node now through packet = do
                 (waiting node)
                 (pure . Map.insert (DestinationHash (Packet.address packet)) entry)
 
+-- | This node was named as the next hop, and where the packet goes
+-- after it is the path table's answer; a proof for what it passed on
+-- goes back the way that packet came.
+relay :: Node -> Interface -> Packet -> IO ()
+relay node through packet = do
+    known <- readMVar (table node)
+    case Transport.relayed (ours node) known packet of
+        Just (out, onward) -> do
+            now <- clock
+            modifyMVar_ (returns node) (pure . Transport.remember through out now packet)
+            transmit out (Packet.pack onward)
+        Nothing
+            | Packet.packetType packet == Packet.Proof -> do
+                back <- modifyMVar (returns node) (pure . swapped . Transport.returned through packet)
+                mapM_ (\out -> transmit out (Packet.pack packet)) back
+            | otherwise -> pure ()
+
 sweepInterval :: Int
 sweepInterval = 1000 * 1000
 
@@ -181,8 +202,10 @@ sweep node = do
     now <- clock
     sending <- modifyMVar (waiting node) (pure . swapped . Transport.due now)
     mapM_ (rebroadcast node) sending
-  where
-    swapped (sending, kept) = (kept, sending)
+    modifyMVar_ (returns node) (pure . Transport.forgotten now)
+
+swapped :: (a, b) -> (b, a)
+swapped (one, other) = (other, one)
 
 -- | The one interface an announce is not carried back onto is the one it
 -- was heard on.
@@ -194,7 +217,7 @@ rebroadcast node entry = do
     raw = Packet.pack (Transport.rebroadcast (ours node) entry)
     targets interfaces = case Transport.toward entry of
         Just one -> [one]
-        Nothing -> filter (not . same (Transport.arrived entry)) interfaces
+        Nothing -> filter (/= Transport.arrived entry) interfaces
 
 send :: Node -> Packet -> IO ()
 send node packet = do
