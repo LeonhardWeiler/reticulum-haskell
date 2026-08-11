@@ -9,6 +9,7 @@ module Reticulum.Path
     , learn
     , forget
     , mark
+    , shorten
     , expired
     , hopsTo
     , timebase
@@ -130,6 +131,9 @@ forget = Map.delete
 
 mark :: State -> DestinationHash -> Table i -> Table i
 mark reach = Map.adjust (\path -> path {state = reach})
+
+shorten :: Word8 -> DestinationHash -> Table i -> Table i
+shorten away = Map.adjust (\path -> path {hops = away})
 
 expired :: Time -> Path i -> Bool
 expired now path = expires path <= now

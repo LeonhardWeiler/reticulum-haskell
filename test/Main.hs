@@ -16,6 +16,7 @@ import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
+import qualified Reticulum.Link as Link
 import qualified Reticulum.Node as Node
 import qualified Reticulum.Packet as Packet
 import Reticulum.Path (Time (Time))
@@ -46,6 +47,16 @@ checks =
     , ("a proof goes back the way the packet came", pure backOut)
     , ("a proof on the wrong interface goes nowhere", pure wrongWay)
     , ("a packet crosses a transport node and its proof returns", throughTheMiddle)
+    , ("a link is opened across a transport node", linkThroughTheMiddle)
+    , ("a link request crossing is written down", pure linkKept)
+    , ("another packet writes no crossing", pure noCrossing)
+    , ("a packet on a link goes to the other side", pure alongTheLink)
+    , ("a link proof crosses back", pure proofBack)
+    , ("a link proof rewrites the hops it took", pure proofRebalances)
+    , ("an unsigned link proof goes nowhere", pure proofUnsigned)
+    , ("a link proof from the near side goes nowhere", pure proofSideways)
+    , ("an unanswered link request is forgotten", pure linkAged)
+    , ("a packet on a crossing link is not remembered", pure linkNotRemembered)
     ]
 
 measure :: (String, IO (Either String ())) -> IO Bool
@@ -89,20 +100,98 @@ held = case Transport.queued (Time 0) 0 () (announced 1 Nothing) of
             (Destination.DestinationHash destination)
             entry {Transport.retries = 1, Transport.sendAt = Time 5}
 
+onePath :: i -> Word8 -> Path.Path i
+onePath at away =
+    Path.Path
+        { Path.via = elsewhere
+        , Path.hops = away
+        , Path.updated = Time 0
+        , Path.expires = Time 100
+        , Path.blobs = []
+        , Path.state = Path.Unknown
+        , Path.announced = B.empty
+        , Path.interface = at
+        }
+
 pathFor :: Word8 -> Path.Table ()
-pathFor away =
-    Map.singleton
-        (Destination.DestinationHash destination)
-        Path.Path
-            { Path.via = elsewhere
-            , Path.hops = away
-            , Path.updated = Time 0
-            , Path.expires = Time 100
-            , Path.blobs = []
-            , Path.state = Path.Unknown
-            , Path.announced = B.empty
-            , Path.interface = ()
-            }
+pathFor away = Map.singleton (Destination.DestinationHash destination) (onePath () away)
+
+linkRequest :: Packet.Packet
+linkRequest =
+    (announced 1 Nothing)
+        { Packet.packetType = Packet.LinkRequest
+        , Packet.payload = B.replicate Link.publicKeysLength 0x55
+        }
+
+crossed :: Transport.Links Char
+crossed = Transport.crossing (Time 0) 'b' (onePath 'a' 3) linkRequest Map.empty
+
+onLink :: Word8 -> Packet.Packet
+onLink away =
+    (announced away Nothing)
+        { Packet.packetType = Packet.Data
+        , Packet.destinationType = Packet.Link
+        , Packet.address = Link.linkId linkRequest
+        }
+
+linkKept :: Either String ()
+linkKept = expect "the crossings written down" 1 (Map.size crossed)
+
+noCrossing :: Either String ()
+noCrossing =
+    expect "the crossings written down" 0 $
+        Map.size (Transport.crossing (Time 0) 'b' (onePath 'a' 3) (carriedTo ours) Map.empty)
+
+alongTheLink :: Either String ()
+alongTheLink = do
+    expect "toward the far side" (Just 'a') (way 'b' 1)
+    expect "back toward the near side" (Just 'b') (way 'a' 3)
+    expect "with the wrong hop count" Nothing (way 'b' 3)
+  where
+    way through away = fst (Transport.alongLink (Time 1) through (onLink away) crossed)
+
+proofBack :: Either String ()
+proofBack = case fst (Transport.proofed (const True) 'a' (linkProof 3) crossed) of
+    Nothing -> Left "the proof did not cross back"
+    Just done -> do
+        expect "the way back" 'b' (Transport.back done)
+        expect "the hops rewritten" Nothing (snd <$> Transport.rebalanced done)
+
+proofRebalances :: Either String ()
+proofRebalances = case fst (Transport.proofed (const True) 'a' (linkProof 2) crossed) of
+    Nothing -> Left "the proof did not cross back"
+    Just done -> do
+        expect "the hops rewritten" (Just 2) (snd <$> Transport.rebalanced done)
+        require "the destination whose path was rewritten" $
+            (fst <$> Transport.rebalanced done) == Just (Destination.DestinationHash destination)
+
+proofUnsigned :: Either String ()
+proofUnsigned =
+    require "an unsigned proof crossed back" $
+        isNothing (fst (Transport.proofed (const False) 'a' (linkProof 3) crossed))
+
+proofSideways :: Either String ()
+proofSideways =
+    require "a proof from the near side crossed back" $
+        isNothing (fst (Transport.proofed (const True) 'b' (linkProof 3) crossed))
+
+linkProof :: Word8 -> Packet.Packet
+linkProof away =
+    (announced away Nothing)
+        { Packet.packetType = Packet.Proof
+        , Packet.context = Packet.LinkRequestProof
+        , Packet.address = Link.linkId linkRequest
+        }
+
+linkAged :: Either String ()
+linkAged = do
+    expect "before the request could be answered" 1 (Map.size (Transport.aged (Time 10) crossed))
+    expect "after it could not" 0 (Map.size (Transport.aged (Time 19) crossed))
+
+linkNotRemembered :: Either String ()
+linkNotRemembered =
+    require "a packet on a crossing link was remembered" $
+        not (Transport.remembered crossed (onLink 1))
 
 carriedTo :: ByteString -> Packet.Packet
 carriedTo hop = (announced 1 (Just hop)) {Packet.packetType = Packet.Data}
@@ -237,7 +326,7 @@ tap label left right = do
 wire :: String -> Node.Node -> Node.Node -> IO ()
 wire label left right = () <$ tap label left right
 
-started :: Bool -> IO (Node.Node, Identity.IdentityHash)
+started :: Bool -> IO (Node.Node, Identity.PrivateKey, Identity.IdentityHash)
 started forwarding = do
     private <- Node.keypair
     case Identity.toPublic private of
@@ -250,7 +339,7 @@ started forwarding = do
                     (\_ _ _ -> pure ())
             case begun of
                 Left reason -> ioError (userError reason)
-                Right node -> pure (node, Identity.identityHash key)
+                Right node -> pure (node, private, Identity.identityHash key)
 
 carried :: ByteString
 carried = C.pack "test.carried"
@@ -275,9 +364,9 @@ reached node emitter = Map.lookup wanted <$> Node.paths node
 
 acrossTwoHops :: IO (Either String ())
 acrossTwoHops = do
-    (first, emitter) <- started False
-    (middle, carrier) <- started True
-    (far, _) <- started False
+    (first, _, emitter) <- started False
+    (middle, _, carrier) <- started True
+    (far, _, _) <- started False
     wire "one" first middle
     wire "two" middle far
     Node.announce first (Destination.name carried) B.empty
@@ -294,9 +383,9 @@ acrossTwoHops = do
 
 nothingCarried :: IO (Either String ())
 nothingCarried = do
-    (first, emitter) <- started False
-    (middle, _) <- started False
-    (far, _) <- started False
+    (first, _, emitter) <- started False
+    (middle, _, _) <- started False
+    (far, _, _) <- started False
     wire "one" first middle
     wire "two" middle far
     Node.announce first (Destination.name carried) B.empty
@@ -333,9 +422,9 @@ message address =
 
 throughTheMiddle :: IO (Either String ())
 throughTheMiddle = do
-    (near, _) <- started False
-    (middle, _) <- started True
-    (far, emitter) <- started False
+    (near, _, _) <- started False
+    (middle, _, _) <- started True
+    (far, _, emitter) <- started False
     (_, backToNear) <- tap "one" near middle
     (towardFar, _) <- tap "two" middle far
     Node.announce far (Destination.name carried) B.empty
@@ -355,5 +444,65 @@ throughTheMiddle = do
                         expect "the hops taken" 1 (Packet.hops onward)
                         expect "what arrived" (C.pack "one packet") (Packet.payload onward)
                         require "the proof did not come back" (isJust back)
+    Node.stop middle
+    pure outcome
+
+opening :: ByteString -> Packet.Packet
+opening address =
+    (announced 0 Nothing)
+        { Packet.packetType = Packet.LinkRequest
+        , Packet.address = address
+        , Packet.payload = B.replicate Link.publicKeysLength 0x55
+        }
+
+answer :: Identity.PrivateKey -> Packet.Packet -> Either String Packet.Packet
+answer secret request = do
+    key <- Identity.toPublic secret
+    let link = Link.linkId request
+        body = Link.RequestProof B.empty (Identity.x25519Public key) Nothing
+    signed <- Identity.sign secret (Link.signedData link (Identity.ed25519Public key) body)
+    pure
+        (announced 0 Nothing)
+            { Packet.packetType = Packet.Proof
+            , Packet.context = Packet.LinkRequestProof
+            , Packet.address = link
+            , Packet.payload = Link.packRequestProof body {Link.signature = signed}
+            }
+
+speaking :: ByteString -> Packet.Packet
+speaking link =
+    (announced 0 Nothing)
+        { Packet.packetType = Packet.Data
+        , Packet.destinationType = Packet.Link
+        , Packet.address = link
+        , Packet.payload = C.pack "over the link"
+        }
+
+linkThroughTheMiddle :: IO (Either String ())
+linkThroughTheMiddle = do
+    (near, _, _) <- started False
+    (middle, _, _) <- started True
+    (far, secret, emitter) <- started False
+    (_, backToNear) <- tap "one" near middle
+    (towardFar, _) <- tap "two" middle far
+    Node.announce far (Destination.name carried) B.empty
+    learned <- waitFor (reached near emitter)
+    outcome <- case learned of
+        Nothing -> pure (Left "the path to the far node was not learned")
+        Just _ -> do
+            Node.send near (opening (addressOf emitter))
+            asked <- awaited towardFar ((== Packet.LinkRequest) . Packet.packetType)
+            case asked of
+                Nothing -> pure (Left "the link request did not cross")
+                Just request -> case answer secret request of
+                    Left reason -> pure (Left ("the proof was not made: " ++ reason))
+                    Right proof -> do
+                        Node.send far proof
+                        crossed' <- awaited backToNear ((== Packet.LinkRequestProof) . Packet.context)
+                        Node.send near (speaking (Link.linkId request))
+                        spoken <- awaited towardFar ((== Packet.Link) . Packet.destinationType)
+                        pure $ do
+                            require "the link proof did not cross back" (isJust crossed')
+                            require "the link carried nothing" (isJust spoken)
     Node.stop middle
     pure outcome

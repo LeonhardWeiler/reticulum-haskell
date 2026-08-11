@@ -23,13 +23,14 @@ import qualified Crypto.Random.Entropy as Entropy
 import Data.Bits (shiftR, testBit)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Unique (Unique, newUnique)
-import Data.Word (Word64)
+import Data.Word (Word64, Word8)
 import System.IO (hPutStrLn, stderr)
 
 import Reticulum.Announce (Announce)
@@ -37,6 +38,7 @@ import qualified Reticulum.Announce as Announce
 import Reticulum.Destination (DestinationHash (DestinationHash, destinationHashBytes), Name)
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
+import qualified Reticulum.Link as Link
 import Reticulum.Packet (Packet (Packet))
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Path as Path
@@ -68,6 +70,8 @@ data Node = Node
     , table :: MVar (Path.Table Interface)
     , waiting :: MVar (Transport.Waiting Interface)
     , returns :: MVar (Transport.Reverse Interface)
+    , links :: MVar (Transport.Links Interface)
+    , announces :: MVar (Map DestinationHash Packet)
     , seen :: MVar (Set ByteString)
     , local :: MVar (Set DestinationHash)
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
@@ -85,6 +89,8 @@ start how private handler = case Identity.toPublic private of
         node <-
             Node private (Identity.identityHashBytes (Identity.identityHash key)) how
                 <$> newMVar []
+                <*> newMVar Map.empty
+                <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
@@ -119,15 +125,17 @@ inbound node through raw
 
 taken :: Node -> Interface -> Packet -> IO ()
 taken node through packet = do
-    allowed <- modifyMVar (seen node) (pure . filtered)
+    crossings <- readMVar (links node)
+    allowed <- modifyMVar (seen node) (pure . filtered crossings)
     when allowed $
         if Packet.packetType packet == Packet.Announce
             then announced node through packet
             else forwarding node (relay node through packet)
   where
-    filtered hashes
+    filtered crossings hashes
         | not verdict = (hashes, False)
-        | Transport.remembered packet = (Set.insert (Packet.packetHash packet) hashes, True)
+        | Transport.remembered crossings packet =
+            (Set.insert (Packet.packetHash packet) hashes, True)
         | otherwise = (hashes, True)
       where
         verdict = Transport.admitted (ours node) hashes packet
@@ -147,6 +155,7 @@ announced node through packet = case Announce.announce packet of
                 case learned of
                     Nothing -> pure ()
                     Just path -> do
+                        modifyMVar_ (announces node) (pure . Map.insert destination packet)
                         forwarding node (queue node now through packet)
                         heard node destination carried path
   where
@@ -182,17 +191,56 @@ queue node now through packet = do
 -- goes back the way that packet came.
 relay :: Node -> Interface -> Packet -> IO ()
 relay node through packet = do
-    known <- readMVar (table node)
-    case Transport.relayed (ours node) known packet of
-        Just (out, onward) -> do
-            now <- clock
-            modifyMVar_ (returns node) (pure . Transport.remember through out now packet)
-            transmit out (Packet.pack onward)
+    reachable <- readMVar (table node)
+    now <- clock
+    case Transport.relayed (ours node) reachable packet of
+        Just (path, onward) -> do
+            modifyMVar_
+                (returns node)
+                (pure . Transport.remember through (Path.interface path) now packet)
+            modifyMVar_ (links node) (pure . Transport.crossing now through path packet)
+            transmit (Path.interface path) (Packet.pack onward)
         Nothing
+            | Packet.context packet == Packet.LinkRequestProof -> settled node through packet
             | Packet.packetType packet == Packet.Proof -> do
                 back <- modifyMVar (returns node) (pure . swapped . Transport.returned through packet)
                 mapM_ (\out -> transmit out (Packet.pack packet)) back
-            | otherwise -> pure ()
+            | otherwise -> do
+                out <- modifyMVar (links node) (pure . swapped . Transport.alongLink now through packet)
+                case out of
+                    Nothing -> pure ()
+                    Just onward -> do
+                        modifyMVar_ (seen node) (pure . Set.insert (Packet.packetHash packet))
+                        transmit onward (Packet.pack packet)
+
+-- | The proof for a link this node is in the middle of is checked with
+-- the key the announce for that destination carried.
+settled :: Node -> Interface -> Packet -> IO ()
+settled node through packet = do
+    cached <- readMVar (announces node)
+    outcome <-
+        modifyMVar (links node) (pure . swapped . Transport.proofed (valid cached) through packet)
+    case outcome of
+        Nothing -> pure ()
+        Just crossed -> do
+            mapM_ (adjusted node) (Transport.rebalanced crossed)
+            transmit (Transport.back crossed) (Packet.pack packet)
+  where
+    valid cached destination = case Map.lookup destination cached of
+        Nothing -> False
+        Just announcement -> case Announce.announce announcement of
+            Left _ -> False
+            Right carried -> case Link.requestProof (Packet.payload packet) of
+                Left _ -> False
+                Right proof ->
+                    Link.signatureValid
+                        (Packet.address packet)
+                        (Identity.ed25519Public (Announce.publicKey carried))
+                        proof
+
+adjusted :: Node -> (DestinationHash, Word8) -> IO ()
+adjusted node (destination, away) =
+    modifyMVar_ (table node) (pure . Path.shorten away destination)
 
 sweepInterval :: Int
 sweepInterval = 1000 * 1000
@@ -203,6 +251,7 @@ sweep node = do
     sending <- modifyMVar (waiting node) (pure . swapped . Transport.due now)
     mapM_ (rebroadcast node) sending
     modifyMVar_ (returns node) (pure . Transport.forgotten now)
+    modifyMVar_ (links node) (pure . Transport.aged now)
 
 swapped :: (a, b) -> (b, a)
 swapped (one, other) = (other, one)
@@ -221,8 +270,8 @@ rebroadcast node entry = do
 
 send :: Node -> Packet -> IO ()
 send node packet = do
-    known <- readMVar (table node)
-    case Transport.outbound known packet of
+    reachable <- readMVar (table node)
+    case Transport.outbound reachable packet of
         Transport.Along through outgoing -> transmit through (Packet.pack outgoing)
         Transport.Everywhere outgoing -> do
             interfaces <- readMVar (attached node)

@@ -12,6 +12,13 @@ module Reticulum.Transport
     , Route (..)
     , outbound
     , relayed
+    , Crossing (..)
+    , Links
+    , crossing
+    , alongLink
+    , Proven (..)
+    , proofed
+    , aged
     , Return (..)
     , Reverse
     , remember
@@ -36,6 +43,7 @@ import qualified Data.Set as Set
 import Data.Word (Word8)
 
 import Reticulum.Destination (DestinationHash (DestinationHash))
+import qualified Reticulum.Link as Link
 import Reticulum.Packet (Packet, Rejection (ShortPayload), addressLength)
 import qualified Reticulum.Packet as Packet
 import Reticulum.Path (Time (Time, seconds))
@@ -105,13 +113,15 @@ admitted ours seen packet
         ]
 
 -- | A link request proof is held out of the duplicate check until it is
--- known not to belong further along the chain.
-remembered :: Packet -> Bool
-remembered packet =
+-- known not to belong further along the chain, and a packet on a link
+-- crossing this node may be seen before its turn.
+remembered :: Links i -> Packet -> Bool
+remembered links packet =
     not
         ( Packet.packetType packet == Packet.Proof
             && Packet.context packet == Packet.LinkRequestProof
         )
+        && Packet.address packet `Map.notMember` links
 
 -- | A packet the node knows a path for goes out on the one interface
 -- that path was heard on, and one already carrying a transport id
@@ -143,13 +153,13 @@ outbound table packet
 
 -- | The hop this node was named as, and the one written in its place:
 -- the last hop before the destination carries no transport id at all.
-relayed :: ByteString -> Path.Table i -> Packet -> Maybe (i, Packet)
+relayed :: ByteString -> Path.Table i -> Packet -> Maybe (Path.Path i, Packet)
 relayed ours table packet
     | Packet.packetType packet == Packet.Announce = Nothing
     | Packet.transportId packet /= Just ours = Nothing
     | otherwise = onward <$> Map.lookup (DestinationHash (Packet.address packet)) table
   where
-    onward path = (Path.interface path, carried path)
+    onward path = (path, carried path)
     carried path
         | Path.hops path > 1 = packet {Packet.transportId = Just (Path.via path)}
         | Path.hops path == 1 =
@@ -158,6 +168,105 @@ relayed ours table packet
                 , Packet.transportType = Packet.Broadcast
                 }
         | otherwise = packet
+
+perHopTimeout :: Double
+perHopTimeout = 6
+
+linkLifetime :: Double
+linkLifetime = 900
+
+-- | What a link crossing this node leaves behind: the two interfaces it
+-- runs between and the hop count each side arrives with.
+data Crossing i = Crossing
+    { hop :: ByteString
+    , ahead :: i
+    , farther :: Word8
+    , behind :: i
+    , nearer :: Word8
+    , between :: DestinationHash
+    , proven :: Bool
+    , deadline :: Time
+    , stamp :: Time
+    }
+
+type Links i = Map ByteString (Crossing i)
+
+crossing :: Time -> i -> Path.Path i -> Packet -> Links i -> Links i
+crossing now through path packet links
+    | Packet.packetType packet /= Packet.LinkRequest = links
+    | otherwise = Map.insert (Link.linkId packet) entry links
+  where
+    entry =
+        Crossing
+            { hop = Path.via path
+            , ahead = Path.interface path
+            , farther = Path.hops path
+            , behind = through
+            , nearer = Packet.hops packet
+            , between = DestinationHash (Packet.address packet)
+            , proven = False
+            , deadline = later now (perHopTimeout * fromIntegral (max 1 (Path.hops path)))
+            , stamp = now
+            }
+
+-- | A packet on a link goes out the side it did not come in on, and one
+-- interface carrying both sides tells them apart by hop count alone.
+alongLink :: Eq i => Time -> i -> Packet -> Links i -> (Maybe i, Links i)
+alongLink now through packet links
+    | Packet.packetType packet `elem` [Packet.Announce, Packet.LinkRequest] = (Nothing, links)
+    | Packet.context packet == Packet.LinkRequestProof = (Nothing, links)
+    | otherwise = case Map.lookup (Packet.address packet) links of
+        Nothing -> (Nothing, links)
+        Just entry -> case direction entry of
+            Nothing -> (Nothing, links)
+            Just out ->
+                ( Just out
+                , Map.insert (Packet.address packet) entry {stamp = now} links
+                )
+  where
+    direction entry
+        | ahead entry == behind entry =
+            if Packet.hops packet `elem` [farther entry, nearer entry]
+                then Just (ahead entry)
+                else Nothing
+        | through == ahead entry =
+            if Packet.hops packet == farther entry then Just (behind entry) else Nothing
+        | through == behind entry =
+            if Packet.hops packet == nearer entry then Just (ahead entry) else Nothing
+        | otherwise = Nothing
+
+data Proven i = Proven
+    { back :: i
+    , rebalanced :: Maybe (DestinationHash, Word8)
+    }
+
+-- | The proof for a link crossing this node is checked here, and the
+-- hop count it arrives with corrects what was written down, once.
+proofed :: Eq i => (DestinationHash -> Bool) -> i -> Packet -> Links i -> (Maybe (Proven i), Links i)
+proofed valid through packet links = case Map.lookup key links of
+    Nothing -> (Nothing, links)
+    Just entry
+        | through /= ahead entry -> (Nothing, links)
+        | not (valid (between entry)) -> (Nothing, links)
+        | Packet.hops packet == farther entry ->
+            (Just (Proven (behind entry) Nothing), settled entry)
+        | not (proven entry) ->
+            ( Just (Proven (behind entry) (Just (between entry, Packet.hops packet)))
+            , settled entry {farther = Packet.hops packet}
+            )
+        | otherwise -> (Nothing, links)
+  where
+    key = Packet.address packet
+    settled entry = Map.insert key entry {proven = True} links
+
+-- | A link that was never proved is given the time its request needed,
+-- and one that was is kept as long as it could still carry a packet.
+aged :: Time -> Links i -> Links i
+aged now = Map.filter alive
+  where
+    alive entry
+        | proven entry = seconds (stamp entry) + linkLifetime > seconds now
+        | otherwise = seconds (deadline entry) > seconds now
 
 data Return i = Return
     { inward :: i
