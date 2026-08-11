@@ -1,10 +1,10 @@
 module Main (main) where
 
+import Data.Bits (shiftR)
 import qualified Data.ByteArray.Encoding as Encoding
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
-import Data.Bits (shiftR)
 import Data.Word (Word16, Word64, Word8)
 import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (ExitFailure), die, exitWith)
@@ -14,6 +14,7 @@ import qualified Reticulum.Channel as Channel
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
+import qualified Reticulum.Interface as Interface
 import qualified Reticulum.Link as Link
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Proof as Proof
@@ -58,6 +59,12 @@ dump kind blobs = case kind of
     "linkdata" ->
         Just (linkdata <$> blob 0 "link request" <*> blob 1 "responder private key" <*> blob 2 "packet")
     "resourceproof" -> Just (resourceproof <$> blob 0 "resource hash" <*> blob 1 "packet")
+    "ifac" ->
+        Just
+            ( ifac (blobs `at` 0) (blobs `at` 1)
+                <$> blob 2 "access code size"
+                <*> blob 3 "frame"
+            )
     "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
     "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
     _ -> Nothing
@@ -353,6 +360,28 @@ resourceproof advertised raw =
         , ("resource_proof", Hex (Resource.dataHash value))
         , ("hash_match", verdict (Resource.provedResource value == advertised))
         ]
+
+ifac :: Maybe ByteString -> Maybe ByteString -> ByteString -> ByteString -> [Field]
+ifac netname netkey rawSize raw =
+    [ ("netname", maybe Absent Hex netname)
+    , ("netkey", maybe Absent Hex netkey)
+    , ("ifac_origin", maybe Absent (Hex . Interface.origin) held)
+    , ("ifac_key", maybe Absent (Hex . Interface.key) held)
+    , ("ifac_size", Dec size)
+    , ("frame_length", Dec (B.length raw))
+    , ("ifac", maybe Absent (Hex . Interface.code) framed)
+    , ("packet", maybe Absent (Hex . Interface.packet) framed)
+    , ("expected_ifac", maybe Absent Hex expected)
+    , ("ifac_valid", maybe Absent verdict ((==) <$> (Interface.code <$> framed) <*> expected))
+    ]
+  where
+    size = B.foldl' (\value read' -> value * 256 + fromIntegral read') 0 rawSize
+    held = Interface.access netname netkey
+    framed = (\value -> Interface.frame value size raw) =<< held
+    expected = do
+        value <- held
+        recovered <- framed
+        Interface.codeFor value size (Interface.packet recovered)
 
 counted :: Maybe Word64 -> Value
 counted = maybe Absent (Dec . fromIntegral)

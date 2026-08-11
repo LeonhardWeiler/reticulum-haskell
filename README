@@ -10,10 +10,9 @@ below is the whole claim.
 
 Where it stands
 
-    100 passed, 0 failed, corpus 72746484, 4 skipped: ifac
+    104 passed, 0 failed, corpus 72746484
 
-Every kind but ifac. A kind not implemented is skipped and named on that
-line; see the corpus's doc/harness, rule 3.
+Every kind the corpus holds, in the decode direction.
 
 
 Build

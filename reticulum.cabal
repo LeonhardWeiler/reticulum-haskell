@@ -20,6 +20,7 @@ library
                      Reticulum.Destination
                      Reticulum.Encryption
                      Reticulum.Identity
+                     Reticulum.Interface
                      Reticulum.Link
                      Reticulum.Msgpack
                      Reticulum.Packet
