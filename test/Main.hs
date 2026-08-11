@@ -10,9 +10,9 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as Lazy
 import Data.Either (rights)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust, isNothing, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Word (Word8)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
@@ -48,6 +48,7 @@ checks =
     , ("a packet for a destination of this node's own is taken and proved", takenAndProved)
     , ("a packet sealed for another key is not taken", notOpened)
     , ("a link this node answers takes what crosses it and proves it", linkAnswered)
+    , ("a link this node opens carries what it says and is proved back", linkOpened)
     , ("a request on a link is answered on the path it names", requestAnswered)
     , ("a resource is taken in parts and proved", resourceTaken False)
     , ("a resource that is compressed is taken", resourceTaken True)
@@ -392,18 +393,16 @@ tap label left right = do
     here <- newEmptyMVar
     there <- newEmptyMVar
     toward <- Node.interface label $ \raw -> do
-        keep onward raw
+        keeping onward raw
         readMVar there >>= \at -> Node.inbound right at raw
     back <- Node.interface label $ \raw -> do
-        keep backward raw
+        keeping backward raw
         readMVar here >>= \at -> Node.inbound left at raw
     putMVar here toward
     putMVar there back
     Node.attach left toward
     Node.attach right back
     pure (readIORef onward, readIORef backward)
-  where
-    keep into raw = atomicModifyIORef' into (\kept -> (kept ++ [raw], ()))
 
 wire :: String -> Node.Node -> Node.Node -> IO ()
 wire label left right = () <$ tap label left right
@@ -427,11 +426,22 @@ carried :: ByteString
 carried = C.pack "test.carried"
 
 emitting :: Node.Node -> IO ()
-emitting node =
-    Node.serve node (Destination.name carried) B.empty quiet >>= Node.announce node
+emitting node = holding node quiet
+
+holding :: Node.Node -> Node.Answering -> IO ()
+holding node hears =
+    Node.serve node (Destination.name carried) B.empty hears >>= Node.announce node
+
+keeping :: IORef [a] -> a -> IO ()
+keeping into value = atomicModifyIORef' into (\kept -> (kept ++ [value], ()))
+
+gathered :: IORef [a] -> IO [a]
+gathered kept = fromMaybe [] <$> waitFor (some <$> readIORef kept)
+  where
+    some values = if null values then Nothing else Just values
 
 quiet :: Node.Answering
-quiet = Node.Answering (const (pure ())) (const (pure ())) Map.empty
+quiet = Node.Answering (const (pure ())) (const (pure ())) Map.empty (const (pure ()))
 
 waitFor :: IO (Maybe a) -> IO (Maybe a)
 waitFor look = go (60 :: Int)
@@ -524,9 +534,7 @@ sealedTo salt key plain =
 serving :: Node.Node -> IO (IO [ByteString])
 serving node = do
     took <- newIORef []
-    _ <-
-        Node.serve node (Destination.name carried) B.empty $
-            quiet {Node.delivered = \plain -> atomicModifyIORef' took (\kept -> (kept ++ [plain], ()))}
+    _ <- Node.serve node (Destination.name carried) B.empty quiet {Node.delivered = keeping took}
     pure (readIORef took)
 
 takenAndProved :: IO (Either String ())
@@ -636,8 +644,7 @@ linked answering = do
 linkAnswered :: IO (Either String ())
 linkAnswered = do
     took <- newIORef []
-    let keeping plain = atomicModifyIORef' took (\kept -> (kept ++ [plain], ()))
-    begun <- linked quiet {Node.delivered = keeping}
+    begun <- linked quiet {Node.delivered = keeping took}
     case begun of
         Left reason -> pure (Left reason)
         Right open -> case Link.sealed (openedKeys open) vector overTheLink of
@@ -667,6 +674,36 @@ linkAnswered = do
   where
     delivery packet =
         Packet.packetType packet == Packet.Proof && Packet.context packet == Packet.None
+
+-- | A link opened against a node that answers one, both ends this
+-- node's own: what crossed it, and the proof that came back for it.
+linkOpened :: IO (Either String ())
+linkOpened = do
+    (near, _, _) <- started False
+    (far, _, emitter) <- started False
+    wire "one" near far
+    took <- newIORef []
+    holding far quiet {Node.delivered = keeping took}
+    found <- waitFor (reached near emitter)
+    case found of
+        Nothing -> pure (Left "the announce did not arrive")
+        Just _ -> do
+            proofs <- newIORef []
+            opened <-
+                Node.open
+                    near
+                    (Destination.DestinationHash (addressOf emitter))
+                    quiet {Node.proved = keeping proofs}
+            case opened of
+                Left reason -> pure (Left reason)
+                Right link -> do
+                    sent <- waitFor (Node.speak near link overTheLink)
+                    arrived <- gathered took
+                    proved <- gathered proofs
+                    pure $ do
+                        require "the link did not open" (isJust sent)
+                        expect "what crossed the link" [overTheLink] arrived
+                        expect "the hash the proof named" (maybe [] pure sent) proved
 
 asked :: ByteString -> ByteString -> ByteString
 asked path body =
@@ -756,8 +793,7 @@ nth reader wanted place = waitFor (found <$> reader)
 resourceTaken :: Bool -> IO (Either String ())
 resourceTaken compress = do
     took <- newIORef []
-    let keeping plain = atomicModifyIORef' took (\kept -> (kept ++ [plain], ()))
-    begun <- linked quiet {Node.assembled = keeping}
+    begun <- linked quiet {Node.assembled = keeping took}
     case begun of
         Left reason -> pure (Left reason)
         Right open -> case Link.sealed (openedKeys open) vector (prefix <> inside) of

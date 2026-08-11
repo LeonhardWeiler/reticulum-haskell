@@ -119,6 +119,7 @@ announcing node name = do
                     [ (Request.named (C.pack "echo"), pure . Just)
                     , (Request.named (C.pack "length"), pure . Just . counted)
                     ]
+            , Node.proved = const (pure ())
             }
     counted plain = C.pack (show (B.length plain))
 

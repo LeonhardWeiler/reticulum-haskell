@@ -22,6 +22,7 @@ module Reticulum.Identity
     , keySize
     , signatureLength
     , ratchetSize
+    , hashLength
     , truncatedHashLength
     , nameHashLength
     ) where
@@ -43,8 +44,11 @@ signatureLength = 64
 ratchetSize :: Int
 ratchetSize = 32
 
+hashLength :: Int
+hashLength = 32
+
 truncatedHashLength :: Int
-truncatedHashLength = 16
+truncatedHashLength = hashLength `div` 2
 
 nameHashLength :: Int
 nameHashLength = 10

@@ -4,6 +4,7 @@ module Reticulum.Msgpack
     ( Value (..)
     , unpack
     , pack
+    , double
     , element
     , entry
     ) where
@@ -12,6 +13,7 @@ import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.Word (Word64, Word8)
+import GHC.Float (castDoubleToWord64)
 
 data Value
     = Nil
@@ -47,6 +49,10 @@ pack (Array values) = counting 0x90 0xdc 0xdd (length values) <> B.concat (map p
 pack (Map keyed) =
     counting 0x80 0xde 0xdf (length keyed)
         <> B.concat [pack key <> pack held | (key, held) <- keyed]
+
+-- | Eight bytes wide, never the four a smaller number would fit in.
+double :: Double -> Value
+double = Float . bigEndianOf 8 . castDoubleToWord64
 
 marked :: Word8 -> Int -> Word64 -> ByteString
 marked marker width count = B.singleton marker <> bigEndianOf width count

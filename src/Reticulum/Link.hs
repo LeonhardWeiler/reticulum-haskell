@@ -20,7 +20,9 @@ module Reticulum.Link
     , identifyValid
     , mode
     , mtu
+    , signalling
     , transmissionUnit
+    , defaultUnit
     , capacity
     , partSize
     , linkId
@@ -194,6 +196,18 @@ mode signalled = case B.uncons =<< signalled of
 
 mtu :: Maybe ByteString -> Maybe Int
 mtu = fmap ((.&. mtuBytemask) . bigEndian)
+
+-- | The three bits the mode is read from are the top of the same three
+-- bytes the unit is written in.
+signalling :: Int -> ByteString
+signalling unit =
+    B.pack
+        [ (modeAes256Cbc `shiftL` 5) .|. fromIntegral (held `shiftR` 16)
+        , fromIntegral (held `shiftR` 8)
+        , fromIntegral held
+        ]
+  where
+    held = unit .&. mtuBytemask
 
 transmissionUnit :: Maybe ByteString -> Int
 transmissionUnit = fromMaybe defaultUnit . mtu

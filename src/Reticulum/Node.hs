@@ -13,6 +13,8 @@ module Reticulum.Node
     , inbound
     , send
     , serve
+    , open
+    , speak
     , announce
     , requestPath
     , paths
@@ -24,7 +26,7 @@ import qualified Codec.Compression.BZip as BZip
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception (SomeException, evaluate, try)
-import Control.Monad (forever, when)
+import Control.Monad (forever, void, when)
 import qualified Crypto.Random.Entropy as Entropy
 import Data.Bits (shiftR, testBit)
 import Data.ByteString (ByteString)
@@ -47,6 +49,7 @@ import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Link as Link
+import qualified Reticulum.Msgpack as Msgpack
 import Reticulum.Packet (Packet (Packet))
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Path as Path
@@ -74,11 +77,13 @@ data Settings = Settings
     }
 
 -- | What a destination of this node's own does with what arrives for
--- it, and what it answers on each path it serves.
+-- it, what it answers on each path it serves, and what it hears about
+-- what it sent.
 data Answering = Answering
     { delivered :: ByteString -> IO ()
     , assembled :: ByteString -> IO ()
     , requested :: Map ByteString (ByteString -> IO (Maybe ByteString))
+    , proved :: ByteString -> IO ()
     }
 
 data Local = Local
@@ -87,17 +92,28 @@ data Local = Local
     , answers :: Answering
     }
 
--- | A link this node answered: the keys the handshake made, the one
--- interface it is allowed to arrive on, and who the far end said it is.
+-- | A link either end opened: the keys the handshake made, the one
+-- interface it is allowed to arrive on, the key the far end signs with,
+-- and who it said it is.
 data Session = Session
     { keys :: Token.Keys
     , at :: Interface
     , since :: Path.Time
     , unit :: Int
-    , serving :: Local
+    , signer :: ByteString
+    , answering :: Answering
     , identified :: Maybe Identity.PublicKey
     , taking :: Map ByteString Resource.Taking
     , gathering :: Map ByteString ByteString
+    }
+
+-- | A link this node asked for and has no proof of yet: the scalars it
+-- offered, the key the answer has to be signed with, and when it went.
+data Opening = Opening
+    { own :: Identity.PrivateKey
+    , theirs :: Identity.PublicKey
+    , began :: Path.Time
+    , hearing :: Answering
     }
 
 data Node = Node
@@ -114,6 +130,7 @@ data Node = Node
     , seen :: MVar (Set ByteString)
     , local :: MVar (Map DestinationHash Local)
     , sessions :: MVar (Map ByteString Session)
+    , pending :: MVar (Map ByteString Opening)
     , requests :: MVar (Set ByteString)
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
     , sweeper :: Maybe ThreadId
@@ -136,6 +153,7 @@ start how private handler = case Identity.toPublic private of
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Set.empty
+                <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Set.empty
@@ -186,12 +204,15 @@ sorted node through packet
     | Packet.address packet == Transport.pathRequestAddress = asked node through packet
     | otherwise = do
         mine <- readMVar (local node)
-        open <- readMVar (sessions node)
+        running <- readMVar (sessions node)
+        asking' <- readMVar (pending node)
         case Map.lookup (DestinationHash (Packet.address packet)) mine of
             Just held -> arrived node through held packet
-            Nothing -> case Map.lookup (Packet.address packet) open of
+            Nothing -> case Map.lookup (Packet.address packet) running of
                 Just session -> spoken node through session packet
-                Nothing -> forwarding node (relay node through packet)
+                Nothing -> case Map.lookup (Packet.address packet) asking' of
+                    Just wanted -> proven node through wanted packet
+                    Nothing -> forwarding node (relay node through packet)
 
 -- | A packet for a destination of this node's own goes no further.
 arrived :: Node -> Interface -> Local -> Packet -> IO ()
@@ -212,23 +233,23 @@ opening node through held packet = case Link.request (Packet.payload packet) of
     Right wanted
         | Link.mode (Link.requestSignalling wanted) /= Link.modeAes256Cbc -> pure ()
         | otherwise -> do
-            ephemeral <- Entropy.getEntropy Encryption.ephemeralLength
+            scalar <- Entropy.getEntropy Encryption.ephemeralLength
             now <- clock
-            case Link.answered (identity node) ephemeral link wanted of
+            case Link.answered (identity node) scalar link wanted of
                 Left reason -> hPutStrLn stderr ("link: " ++ reason)
                 Right (shook, body) -> do
-                    let signalled = Link.requestSignalling wanted
-                    modifyMVar_ (sessions node) (pure . Map.insert link (begun shook now signalled))
+                    modifyMVar_ (sessions node) (pure . Map.insert link (begun shook now wanted))
                     transmit through (Packet.pack (written body))
   where
     link = Link.linkId packet
-    begun shook now signalled =
+    begun shook now wanted =
         Session
             { keys = Link.keys shook
             , at = through
             , since = now
-            , unit = Link.transmissionUnit signalled
-            , serving = held
+            , unit = Link.transmissionUnit (Link.requestSignalling wanted)
+            , signer = Link.ed25519Public wanted
+            , answering = answers held
             , identified = Nothing
             , taking = Map.empty
             , gathering = Map.empty
@@ -255,28 +276,37 @@ onLink link kind told body =
 spoken :: Node -> Interface -> Session -> Packet -> IO ()
 spoken node through session packet
     | through /= at session = pure ()
-    | Packet.packetType packet /= Packet.Data = pure ()
     | otherwise = do
         now <- clock
         modifyMVar_ (sessions node) (pure . Map.adjust (\held -> held {since = now}) link)
-        case Packet.context packet of
-            Packet.Keepalive -> when (Packet.payload packet == B.singleton alive) answering
-            Packet.None -> mapM_ took (opened (Packet.payload packet))
-            Packet.LinkIdentify -> mapM_ names (opened (Packet.payload packet))
-            Packet.LinkClose -> mapM_ closes (opened (Packet.payload packet))
-            Packet.Request -> mapM_ (asking session packet) (opened (Packet.payload packet))
-            Packet.ResourceAdv -> mapM_ (advertised node session link) (opened (Packet.payload packet))
-            Packet.Resource -> piece node session link (Packet.payload packet)
-            Packet.ResourceHmu -> mapM_ (updated node session link) (opened (Packet.payload packet))
-            Packet.ResourceIcl -> mapM_ (forgotten node link) (opened (Packet.payload packet))
+        case Packet.packetType packet of
+            Packet.Data -> data'
+            Packet.Proof -> when (Packet.context packet == Packet.None) witnessed
             _ -> pure ()
   where
     link = Packet.address packet
     opened = Link.opened (keys session)
-    answering = transmit through (Packet.pack (onLink link Packet.Data Packet.Keepalive awake))
+    data' = case Packet.context packet of
+        Packet.Keepalive -> when (Packet.payload packet == B.singleton alive) awakening
+        Packet.None -> mapM_ took (opened (Packet.payload packet))
+        Packet.LinkIdentify -> mapM_ names (opened (Packet.payload packet))
+        Packet.LinkClose -> mapM_ closes (opened (Packet.payload packet))
+        Packet.Request -> mapM_ (asking session packet) (opened (Packet.payload packet))
+        Packet.ResourceAdv -> mapM_ (advertised node session link) (opened (Packet.payload packet))
+        Packet.Resource -> piece node session link (Packet.payload packet)
+        Packet.ResourceHmu -> mapM_ (updated node session link) (opened (Packet.payload packet))
+        Packet.ResourceIcl -> mapM_ (forgotten node link) (opened (Packet.payload packet))
+        _ -> pure ()
+    awakening = transmit through (Packet.pack (onLink link Packet.Data Packet.Keepalive awake))
     took plain = do
-        delivered (answers (serving session)) plain
+        delivered (answering session) plain
         proveOnLink node session packet
+    witnessed = case B.splitAt Identity.hashLength (Packet.payload packet) of
+        (hash, signed)
+            | B.length signed == Identity.signatureLength
+            , Identity.verify (signer session) hash signed ->
+                proved (answering session) hash
+        _ -> pure ()
     names plain = case Link.identify plain of
         Just who
             | Link.identifyValid link who ->
@@ -303,13 +333,13 @@ asking session packet =
 served :: Session -> ByteString -> ByteString -> ByteString -> IO ()
 served session link identifier plain = case Request.request plain of
     Left _ -> pure ()
-    Right wanted -> case answering =<< Request.pathHash wanted of
+    Right wanted -> case serves =<< Request.pathHash wanted of
         Nothing -> pure ()
         Just handler -> do
             given <- handler (fromMaybe B.empty (Request.requestBody wanted))
             mapM_ (responding session link identifier) given
   where
-    answering path = Map.lookup path (requested (answers (serving session)))
+    serves path = Map.lookup path (requested (answering session))
 
 -- | An answer that does not fit in one packet on this link is not one
 -- this node can send.
@@ -317,16 +347,21 @@ responding :: Session -> ByteString -> ByteString -> ByteString -> IO ()
 responding session link identifier body
     | B.length packed > Link.capacity (unit session) =
         hPutStrLn stderr ("response: " ++ show (B.length packed) ++ " bytes")
-    | otherwise = sending session link Packet.Response packed
+    | otherwise = void (sending session link Packet.Response packed)
   where
     packed = Request.packResponse identifier body
 
-sending :: Session -> ByteString -> Packet.Context -> ByteString -> IO ()
+-- | The packet is handed back, because the hash the far end proves is
+-- one only the end that sent it can name.
+sending :: Session -> ByteString -> Packet.Context -> ByteString -> IO (Maybe Packet)
 sending session link told plain = do
     vector <- Entropy.getEntropy Token.blockSize
     case Link.sealed (keys session) vector plain of
-        Nothing -> hPutStrLn stderr "link: nothing was sealed"
-        Just body -> transmit (at session) (Packet.pack (onLink link Packet.Data told body))
+        Nothing -> Nothing <$ hPutStrLn stderr "link: nothing was sealed"
+        Just body -> do
+            let packet = onLink link Packet.Data told body
+            transmit (at session) (Packet.pack packet)
+            pure (Just packet)
 
 -- | An advertisement is taken as far as the parts it names, and the
 -- first window of them is asked for at once.
@@ -347,11 +382,11 @@ wanting node session link wanted = do
     payload <- modifyMVar (sessions node) (pure . stepped)
     mapM_ (sending session link Packet.ResourceReq) payload
   where
-    stepped open = case Map.lookup link open >>= (Map.lookup wanted . taking) of
-        Nothing -> (open, Nothing)
+    stepped running = case Map.lookup link running >>= (Map.lookup wanted . taking) of
+        Nothing -> (running, Nothing)
         Just held -> case Resource.next held of
-            Nothing -> (open, Nothing)
-            Just (payload, after) -> (Map.adjust (put after) link open, Just payload)
+            Nothing -> (running, Nothing)
+            Just (payload, after) -> (Map.adjust (put after) link running, Just payload)
     put after held = held {taking = Map.insert wanted after (taking held)}
 
 updated :: Node -> Session -> ByteString -> ByteString -> IO ()
@@ -377,11 +412,11 @@ piece node session link raw = do
     moved <- modifyMVar (sessions node) (pure . advanced)
     mapM_ (advancing node session link) moved
   where
-    advanced open = case Map.lookup link open of
-        Nothing -> (open, [])
+    advanced running = case Map.lookup link running of
+        Nothing -> (running, [])
         Just held ->
             let after = Map.map (Resource.part raw) (taking held)
-             in (Map.insert link held {taking = after} open, Map.elems after)
+             in (Map.insert link held {taking = after} running, Map.elems after)
 
 advancing :: Node -> Session -> ByteString -> Resource.Taking -> IO ()
 advancing node session link held = case Resource.whole held of
@@ -412,7 +447,7 @@ assembling node session link held stream = do
         | Resource.compressed held = maybe (pure Nothing) decompressed body
         | otherwise = pure body
     forget = modifyMVar_ (sessions node) (pure . Map.adjust dropping link)
-    dropping open = open {taking = Map.delete (Resource.resource held) (taking open)}
+    dropping running = running {taking = Map.delete (Resource.resource held) (taking running)}
 
 -- | The decompressor throws on bytes that are not what it takes, and
 -- nothing that came in over a link is trusted to be them.
@@ -440,20 +475,20 @@ concluded node session link held body
         earlier <- modifyMVar (sessions node) (pure . gathered)
         given (earlier <> body)
   where
-    keeping open =
-        open
+    keeping running =
+        running
             { gathering =
-                Map.insertWith (flip (<>)) (Resource.original held) body (gathering open)
+                Map.insertWith (flip (<>)) (Resource.original held) body (gathering running)
             }
-    gathered open = case Map.lookup link open of
-        Nothing -> (open, B.empty)
+    gathered running = case Map.lookup link running of
+        Nothing -> (running, B.empty)
         Just kept ->
-            ( Map.insert link kept {gathering = Map.delete (Resource.original held) (gathering kept)} open
+            ( Map.insert link kept {gathering = Map.delete (Resource.original held) (gathering kept)} running
             , fromMaybe B.empty (Map.lookup (Resource.original held) (gathering kept))
             )
     given whole = case (Resource.asked held, Resource.identifier held) of
         (True, Just identifier) -> served session link identifier whole
-        _ -> assembled (answers (serving session)) whole
+        _ -> assembled (answering session) whole
 
 -- | A proof on a link carries the hash it proves, which one from a
 -- destination does not.
@@ -606,9 +641,9 @@ sweep node = do
     mapM_ (rebroadcast node) due
     modifyMVar_ (returns node) (pure . Transport.forgotten now interfaces)
     modifyMVar_ (links node) (pure . Transport.aged now interfaces)
-    modifyMVar_ (sessions node) (pure . Map.filter (open now interfaces))
+    modifyMVar_ (sessions node) (pure . Map.filter (unstale now interfaces))
   where
-    open now interfaces session =
+    unstale now interfaces session =
         Path.seconds (since session) + staleTime > Path.seconds now
             && at session `elem` interfaces
 
@@ -644,13 +679,111 @@ send node packet = do
         Transport.Nowhere -> pure ()
 
 serve :: Node -> Name -> ByteString -> Answering -> IO DestinationHash
-serve node called carried answering = do
+serve node called carried hears = do
     modifyMVar_ (local node) (pure . Map.insert destination held)
     pure destination
   where
     hash = Destination.nameHash called
     destination = whose node hash
-    held = Local {nameHash = hash, appData = carried, answers = answering}
+    held = Local {nameHash = hash, appData = carried, answers = hears}
+
+-- | The key the link is asked for is the one the announce for that
+-- destination carried, and a destination nothing was heard from cannot
+-- be asked at all.
+open :: Node -> DestinationHash -> Answering -> IO (Either String ByteString)
+open node destination hears = do
+    cached <- readMVar (announces node)
+    case Map.lookup destination cached >>= carriedKey of
+        Nothing -> pure (Left "nothing was heard from that destination")
+        Just key -> do
+            secret <- keypair
+            case Identity.toPublic secret of
+                Left reason -> pure (Left reason)
+                Right point -> do
+                    now <- clock
+                    let packet = requesting (destinationHashBytes destination) point
+                        link = Link.linkId packet
+                    modifyMVar_
+                        (pending node)
+                        (pure . Map.insert link (Opening secret key now hears))
+                    send node packet
+                    pure (Right link)
+  where
+    carriedKey announcement = case Announce.announce announcement of
+        Left _ -> Nothing
+        Right carried -> Just (Announce.publicKey carried)
+
+-- | The two points offered are of a keypair made for this link and kept
+-- nowhere else.
+requesting :: ByteString -> Identity.PublicKey -> Packet
+requesting toward point =
+    Packet
+        { Packet.contextFlag = False
+        , Packet.transportType = Packet.Broadcast
+        , Packet.destinationType = Packet.Single
+        , Packet.packetType = Packet.LinkRequest
+        , Packet.hops = 0
+        , Packet.transportId = Nothing
+        , Packet.address = toward
+        , Packet.context = Packet.None
+        , Packet.payload =
+            Link.packRequest
+                Link.Request
+                    { Link.x25519Public = Identity.x25519Public point
+                    , Link.ed25519Public = Identity.ed25519Public point
+                    , Link.requestSignalling = Just (Link.signalling Link.defaultUnit)
+                    }
+        }
+
+-- | The link is open once the proof is signed by the destination, and
+-- the round trip that goes back is what the far end waits for.
+proven :: Node -> Interface -> Opening -> Packet -> IO ()
+proven node through wanted packet
+    | Packet.packetType packet /= Packet.Proof = pure ()
+    | Packet.context packet /= Packet.LinkRequestProof = pure ()
+    | otherwise = case Link.requestProof (Packet.payload packet) of
+        Left _ -> pure ()
+        Right body
+            | not (Link.signatureValid link key body) -> pure ()
+            | otherwise -> case Link.handshake scalar (Link.responderPublic body) link of
+                Nothing -> hPutStrLn stderr "link: the handshake made no keys"
+                Just shook -> do
+                    now <- clock
+                    let session = begun shook now body
+                    modifyMVar_ (sessions node) (pure . Map.insert link session)
+                    modifyMVar_ (pending node) (pure . Map.delete link)
+                    void (sending session link Packet.LinkRtt (roundTrip (elapsed now)))
+  where
+    link = Packet.address packet
+    key = Identity.ed25519Public (theirs wanted)
+    scalar = Identity.x25519Private (own wanted)
+    elapsed now = Path.seconds now - Path.seconds (began wanted)
+    begun shook now body =
+        Session
+            { keys = Link.keys shook
+            , at = through
+            , since = now
+            , unit = Link.transmissionUnit (Link.proofSignalling body)
+            , signer = key
+            , answering = hearing wanted
+            , identified = Nothing
+            , taking = Map.empty
+            , gathering = Map.empty
+            }
+
+-- | The one packet on a link that carries a number, and the far end
+-- calls the link open when it arrives.
+roundTrip :: Double -> ByteString
+roundTrip = Msgpack.pack . Msgpack.double
+
+-- | The hash goes back because the proof the far end writes names it,
+-- and the end that sent the packet is the only one that can.
+speak :: Node -> ByteString -> ByteString -> IO (Maybe ByteString)
+speak node link plain = do
+    running <- readMVar (sessions node)
+    case Map.lookup link running of
+        Nothing -> pure Nothing
+        Just session -> fmap Packet.packetHash <$> sending session link Packet.None plain
 
 announce :: Node -> DestinationHash -> IO ()
 announce node destination = do
@@ -723,11 +856,11 @@ answer node through wanted = do
                 _ -> pure ()
   where
     destination = DestinationHash (Transport.wantedHash wanted)
-    respond now path announcement pending =
+    respond now path announcement held =
         Map.insert
             destination
-            (Transport.responding now through path announcement (Map.lookup destination pending))
-            pending
+            (Transport.responding now through path announcement (Map.lookup destination held))
+            held
 
 requestPath :: Node -> DestinationHash -> IO ()
 requestPath node destination = do
