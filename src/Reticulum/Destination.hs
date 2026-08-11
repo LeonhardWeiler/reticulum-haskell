@@ -42,6 +42,7 @@ fromComponents app parts
 newtype NameHash = NameHash {nameHashBytes :: ByteString}
 
 newtype DestinationHash = DestinationHash {destinationHashBytes :: ByteString}
+    deriving (Eq, Ord)
 
 -- | The name is hashed as the bytes it was given, and normalising them
 -- makes a different destination.
