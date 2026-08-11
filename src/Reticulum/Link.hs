@@ -18,6 +18,12 @@ module Reticulum.Link
     , identify
     , identifySigned
     , identifyValid
+    , Traffic (..)
+    , crossed
+    , waking
+    , stale
+    , keepaliveInterval
+    , staleTime
     , mode
     , mtu
     , signalling
@@ -185,6 +191,34 @@ identifySigned link value = link <> Identity.publicKeyBytes (identityPublic valu
 identifyValid :: ByteString -> Identify -> Bool
 identifyValid link value =
     Identity.validate (identityPublic value) (identifySigned link value) (identitySignature value)
+
+-- | The three times a link is measured by: when something last came in
+-- on it, when something last went out, and when this end last woke the
+-- other.
+data Traffic = Traffic
+    { inbound :: Double
+    , outbound :: Double
+    , woken :: Double
+    }
+
+crossed :: Double -> Traffic
+crossed now = Traffic now now now
+
+keepaliveInterval :: Double
+keepaliveInterval = 360
+
+staleTime :: Double
+staleTime = 2 * keepaliveInterval
+
+-- | The interval gone by in either direction is what makes one due, and
+-- the last one written is what makes it wait.
+waking :: Double -> Traffic -> Bool
+waking now held =
+    (now >= inbound held + keepaliveInterval || now >= outbound held + keepaliveInterval)
+        && now >= woken held + keepaliveInterval
+
+stale :: Double -> Traffic -> Bool
+stale now held = now >= inbound held + staleTime
 
 -- | The decoder returns the three bits it read whatever they are, and
 -- a packet that signals nothing reads as the one mode the reference

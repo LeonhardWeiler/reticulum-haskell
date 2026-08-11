@@ -14,6 +14,7 @@ module Reticulum.Node
     , send
     , serve
     , open
+    , close
     , speak
     , ask
     , hand
@@ -87,6 +88,7 @@ data Answering = Answering
     , requested :: Map ByteString (ByteString -> IO (Maybe ByteString))
     , proved :: ByteString -> IO ()
     , answered :: ByteString -> ByteString -> IO ()
+    , closed :: IO ()
     }
 
 data Local = Local
@@ -101,7 +103,8 @@ data Local = Local
 data Session = Session
     { keys :: Token.Keys
     , at :: Interface
-    , since :: Path.Time
+    , traffic :: Link.Traffic
+    , opener :: Bool
     , unit :: Int
     , signer :: ByteString
     , answering :: Answering
@@ -250,7 +253,8 @@ opening node through held packet = case Link.request (Packet.payload packet) of
         Session
             { keys = Link.keys shook
             , at = through
-            , since = now
+            , traffic = Link.crossed (Path.seconds now)
+            , opener = False
             , unit = Link.transmissionUnit (Link.requestSignalling wanted)
             , signer = Link.ed25519Public wanted
             , answering = answers held
@@ -283,13 +287,14 @@ spoken node through session packet
     | through /= at session = pure ()
     | otherwise = do
         now <- clock
-        modifyMVar_ (sessions node) (pure . Map.adjust (\held -> held {since = now}) link)
+        modifyMVar_ (sessions node) (pure . Map.adjust (came now) link)
         case Packet.packetType packet of
             Packet.Data -> data'
             Packet.Proof -> proof'
             _ -> pure ()
   where
     link = Packet.address packet
+    came now held = held {traffic = (traffic held) {Link.inbound = Path.seconds now}}
     opened = Link.opened (keys session)
     proof' = case Packet.context packet of
         Packet.None -> witnessed
@@ -308,7 +313,7 @@ spoken node through session packet
         Packet.ResourceHmu -> mapM_ (updated node session link) (opened (Packet.payload packet))
         Packet.ResourceIcl -> mapM_ (forgotten node link) (opened (Packet.payload packet))
         _ -> pure ()
-    awakening = transmit through (Packet.pack (onLink link Packet.Data Packet.Keepalive awake))
+    awakening = writing node session (onLink link Packet.Data Packet.Keepalive awake)
     took plain = do
         delivered (answering session) plain
         proveOnLink node session packet
@@ -343,7 +348,7 @@ spoken node through session packet
                     (sessions node)
                     (pure . Map.adjust (\held -> held {identified = Just (Link.identityPublic who)}) link)
         _ -> pure ()
-    closes plain = when (plain == link) (modifyMVar_ (sessions node) (pure . Map.delete link))
+    closes plain = when (plain == link) (ending node session link)
 
 -- | The one packet on a link that carries no token, and the two bytes
 -- that are the whole exchange.
@@ -352,6 +357,36 @@ alive = 0xff
 
 awake :: ByteString
 awake = B.singleton 0xfe
+
+-- | Every packet this end writes on a link is one the far end need not
+-- be woken for.
+writing :: Node -> Session -> Packet -> IO ()
+writing node session packet = do
+    transmit (at session) (Packet.pack packet)
+    now <- clock
+    modifyMVar_ (sessions node) (pure . Map.adjust (wrote now) (Packet.address packet))
+  where
+    wrote now held = held {traffic = (traffic held) {Link.outbound = Path.seconds now}}
+
+-- | A link that ends is one nothing more crosses, and the end that held
+-- it hears so once.
+ending :: Node -> Session -> ByteString -> IO ()
+ending node session link = do
+    was <- modifyMVar (sessions node) (pure . swapped . Map.updateLookupWithKey forget link)
+    mapM_ (const (closed (answering session))) was
+  where
+    forget _ _ = Nothing
+
+-- | The close carries the link id, and the end that writes one keeps
+-- nothing of the link and is told nothing it did itself.
+close :: Node -> ByteString -> IO ()
+close node link = do
+    running <- readMVar (sessions node)
+    case Map.lookup link running of
+        Nothing -> pure ()
+        Just session -> do
+            _ <- sending node session link Packet.LinkClose link
+            modifyMVar_ (sessions node) (pure . Map.delete link)
 
 -- | The request is answered under the id of the packet that asked.
 asking :: Node -> Session -> Packet -> ByteString -> IO ()
@@ -377,20 +412,20 @@ responding :: Node -> Session -> ByteString -> ByteString -> ByteString -> IO ()
 responding node session link identifier body
     | B.length packed > Link.capacity (unit session) =
         void (handed node link packed (Just (identifier, True)))
-    | otherwise = void (sending session link Packet.Response packed)
+    | otherwise = void (sending node session link Packet.Response packed)
   where
     packed = Request.packResponse identifier body
 
 -- | The packet is handed back, because the hash the far end proves is
 -- one only the end that sent it can name.
-sending :: Session -> ByteString -> Packet.Context -> ByteString -> IO (Maybe Packet)
-sending session link told plain = do
+sending :: Node -> Session -> ByteString -> Packet.Context -> ByteString -> IO (Maybe Packet)
+sending node session link told plain = do
     vector <- Entropy.getEntropy Token.blockSize
     case Link.sealed (keys session) vector plain of
         Nothing -> Nothing <$ hPutStrLn stderr "link: nothing was sealed"
         Just body -> do
             let packet = onLink link Packet.Data told body
-            transmit (at session) (Packet.pack packet)
+            writing node session packet
             pure (Just packet)
 
 -- | An advertisement is taken as far as the parts it names, and the
@@ -410,7 +445,7 @@ advertised node session link plain = case Resource.advertisement plain of
 wanting :: Node -> Session -> ByteString -> ByteString -> IO ()
 wanting node session link wanted = do
     payload <- modifyMVar (sessions node) (pure . stepped)
-    mapM_ (sending session link Packet.ResourceReq) payload
+    mapM_ (sending node session link Packet.ResourceReq) payload
   where
     stepped running = case Map.lookup link running >>= (Map.lookup wanted . taking) of
         Nothing -> (running, Nothing)
@@ -465,9 +500,10 @@ assembling node session link held stream = do
         Just body
             | Identity.fullHash (body <> Resource.entropy held) /= Resource.resource held -> pure ()
             | otherwise -> do
-                transmit
-                    (at session)
-                    (Packet.pack (onLink link Packet.Proof Packet.ResourcePrf (Resource.proving body held)))
+                writing
+                    node
+                    session
+                    (onLink link Packet.Proof Packet.ResourcePrf (Resource.proving body held))
                 concluded node session link held (metadata held body)
   where
     unwrapped
@@ -535,8 +571,8 @@ giving node session link plain = case Resource.partRequest plain of
         case outcome of
             Nothing -> pure ()
             Just (cut, told) -> do
-                mapM_ (transmit (at session) . Packet.pack . onLink link Packet.Data Packet.Resource) cut
-                mapM_ (void . sending session link Packet.ResourceHmu . Resource.packUpdate) told
+                mapM_ (writing node session . onLink link Packet.Data Packet.Resource) cut
+                mapM_ (void . sending node session link Packet.ResourceHmu . Resource.packUpdate) told
   where
     stepped wanted running = case held running wanted of
         Nothing -> (running, Nothing)
@@ -566,7 +602,7 @@ handed node link body asking' = do
                 Just stream -> do
                     let kept = made session salt stream
                     modifyMVar_ (sessions node) (pure . Map.adjust (keeping kept) link)
-                    _ <- sending session link Packet.ResourceAdv (advertisement kept)
+                    _ <- sending node session link Packet.ResourceAdv (advertisement kept)
                     pure (Just (Resource.given kept))
   where
     packed = Lazy.toStrict (BZip.compress (Lazy.fromStrict body))
@@ -584,9 +620,7 @@ proveOnLink :: Node -> Session -> Packet -> IO ()
 proveOnLink node session packet = case Identity.sign (identity node) hash of
     Left reason -> hPutStrLn stderr ("proof: " ++ reason)
     Right signed ->
-        transmit
-            (at session)
-            (Packet.pack (onLink (Packet.address packet) Packet.Proof Packet.None (hash <> signed)))
+        writing node session (onLink (Packet.address packet) Packet.Proof Packet.None (hash <> signed))
   where
     hash = Packet.packetHash packet
 
@@ -729,17 +763,24 @@ sweep node = do
     mapM_ (rebroadcast node) due
     modifyMVar_ (returns node) (pure . Transport.forgotten now interfaces)
     modifyMVar_ (links node) (pure . Transport.aged now interfaces)
-    modifyMVar_ (sessions node) (pure . Map.filter (unstale now interfaces))
+    running <- readMVar (sessions node)
+    mapM_ (timed node now interfaces) (Map.toList running)
+
+-- | The end that opened the link is the end that wakes it, and a link
+-- nothing has come in on for two intervals is one either end closes; one
+-- whose interface is gone cannot be told about it.
+timed :: Node -> Path.Time -> [Interface] -> (ByteString, Session) -> IO ()
+timed node now interfaces (link, session)
+    | at session `notElem` interfaces = ending node session link
+    | Link.stale (Path.seconds now) (traffic session) =
+        close node link >> closed (answering session)
+    | opener session && Link.waking (Path.seconds now) (traffic session) = waken
+    | otherwise = pure ()
   where
-    unstale now interfaces session =
-        Path.seconds (since session) + staleTime > Path.seconds now
-            && at session `elem` interfaces
-
-keepalive :: Double
-keepalive = 360
-
-staleTime :: Double
-staleTime = 2 * keepalive
+    waken = do
+        writing node session (onLink link Packet.Data Packet.Keepalive (B.singleton alive))
+        modifyMVar_ (sessions node) (pure . Map.adjust woke link)
+    woke held = held {traffic = (traffic held) {Link.woken = Path.seconds now}}
 
 swapped :: (a, b) -> (b, a)
 swapped (one, other) = (other, one)
@@ -840,7 +881,7 @@ proven node through wanted packet
                     let session = begun shook now body
                     modifyMVar_ (sessions node) (pure . Map.insert link session)
                     modifyMVar_ (pending node) (pure . Map.delete link)
-                    void (sending session link Packet.LinkRtt (roundTrip (elapsed now)))
+                    void (sending node session link Packet.LinkRtt (roundTrip (elapsed now)))
   where
     link = Packet.address packet
     key = Identity.ed25519Public (theirs wanted)
@@ -850,7 +891,8 @@ proven node through wanted packet
         Session
             { keys = Link.keys shook
             , at = through
-            , since = now
+            , traffic = Link.crossed (Path.seconds now)
+            , opener = True
             , unit = Link.transmissionUnit (Link.proofSignalling body)
             , signer = key
             , answering = hearing wanted
@@ -872,7 +914,7 @@ speak node link plain = do
     running <- readMVar (sessions node)
     case Map.lookup link running of
         Nothing -> pure Nothing
-        Just session -> fmap Packet.packetHash <$> sending session link Packet.None plain
+        Just session -> fmap Packet.packetHash <$> sending node session link Packet.None plain
 
 -- | The answer names the packet that asked, so what comes back is the
 -- id that end will hash out of it.
@@ -890,7 +932,7 @@ ask node link path body = do
             Just identifier <$ handed node link packed (Just (identifier, False))
         | otherwise =
             fmap (Identity.truncatedHash . Packet.hashablePart)
-                <$> sending session link Packet.Request packed
+                <$> sending node session link Packet.Request packed
       where
         identifier = Identity.truncatedHash packed
 

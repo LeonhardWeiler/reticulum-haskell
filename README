@@ -123,8 +123,15 @@ With -d the node is the end that opens. It asks for the path until it
 has one, opens a link to that destination, and on it sends a packet and
 waits for the proof, asks echo and takes the answer, asks length with
 more than one packet holds so the request goes as a resource, and hands
-a resource over and waits for the proof of it. Every one of those
-prints a line.
+a resource over and waits for the proof of it, and then closes the
+link. Every one of those prints a line.
+
+A link is kept while it is used. The end that opened one writes a
+keepalive when nothing has crossed it either way for six minutes, and
+the other end answers. Either end writes a close, and the end that
+takes one keeps nothing of the link. A link nothing has come in on for
+twelve minutes is closed the same way, and so is one whose interface is
+gone.
 
 
 Tests

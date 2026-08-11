@@ -128,6 +128,7 @@ announcing node name = do
                     ]
             , Node.proved = const (pure ())
             , Node.answered = \_ _ -> pure ()
+            , Node.closed = putStrLn "link closed"
             }
     counted plain = C.pack (show (B.length plain))
 
@@ -154,6 +155,9 @@ talking node wanted = do
                     threadDelay pause
                     given <- Node.hand node link (grain 3000)
                     remember named given "resource"
+                    threadDelay pause
+                    Node.close node link
+                    putStrLn "closed the link"
   where
     destination = Destination.DestinationHash wanted
     remember named held label =
@@ -177,6 +181,7 @@ hears named =
             labels <- readIORef named
             putStrLn (unwords [fromMaybe (hex hash) (Map.lookup hash labels), "proved"])
         , Node.answered = \_ body -> putStrLn (unwords ["answer", show body])
+        , Node.closed = putStrLn "link closed"
         }
 
 pause :: Int

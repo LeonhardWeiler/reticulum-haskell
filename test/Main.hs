@@ -49,6 +49,9 @@ checks =
     , ("a packet sealed for another key is not taken", notOpened)
     , ("a link this node answers takes what crosses it and proves it", linkAnswered)
     , ("a link this node opens carries what it says and is proved back", linkOpened)
+    , ("a link this end closes is gone at the far end", linkClosed True)
+    , ("a link the far end closes is gone here", linkClosed False)
+    , ("a keepalive is due when the interval has passed", pure whenWoken)
     , ("a request this node sends is answered under the id it named", requestSent 11)
     , ("a request too long for one packet goes as a resource", requestSent 4000)
     , ("a resource this node hands over arrives whole and is proved", resourceGiven 3000)
@@ -452,6 +455,7 @@ quiet =
         Map.empty
         (const (pure ()))
         (\_ _ -> pure ())
+        (pure ())
 
 waitFor :: IO (Maybe a) -> IO (Maybe a)
 waitFor look = go (60 :: Int)
@@ -711,6 +715,54 @@ linkOpened = do
                         require "the link did not open" (isJust sent)
                         expect "what crossed the link" [overTheLink] arrived
                         expect "the hash the proof named" (maybe [] pure sent) proved
+
+-- | Both ends this node's own: the close one of them writes, the end
+-- that hears it, and the link that carries nothing afterwards.
+linkClosed :: Bool -> IO (Either String ())
+linkClosed byOpener = do
+    ends <- newIORef []
+    (near, _, _) <- started False
+    (far, _, emitter) <- started False
+    wire "one" near far
+    holding far quiet {Node.closed = keeping ends ()}
+    found <- waitFor (reached near emitter)
+    case found of
+        Nothing -> pure (Left "the announce did not arrive")
+        Just _ -> do
+            here <- newIORef []
+            opened <-
+                Node.open
+                    near
+                    (Destination.DestinationHash (addressOf emitter))
+                    quiet {Node.closed = keeping here ()}
+            case opened of
+                Left reason -> pure (Left reason)
+                Right link -> do
+                    sent <- waitFor (Node.speak near link overTheLink)
+                    Node.close (if byOpener then near else far) link
+                    heard <- gathered (if byOpener then ends else here)
+                    after <- Node.speak near link overTheLink
+                    pure $ do
+                        require "the link did not open" (isJust sent)
+                        expect "what the end that did not write it heard" [()] heard
+                        require "the link carried a packet after the close" (isNothing after)
+
+-- | The interval gone by in either direction is what makes a keepalive
+-- due, and two of them with nothing coming in end the link.
+whenWoken :: Either String ()
+whenWoken = do
+    require "a link just opened is woken" (not (Link.waking now (Link.crossed now)))
+    require "the interval passed wakes nothing" (Link.waking later (Link.crossed now))
+    require "a keepalive written since is written again" $
+        not (Link.waking later (Link.crossed now) {Link.woken = later - 1})
+    require "what only went out is counted as something coming in" $
+        Link.waking later (Link.crossed now) {Link.outbound = later}
+    require "one interval of quiet is stale" (not (Link.stale later (Link.crossed now)))
+    require "two intervals of quiet are not" $
+        Link.stale (later + Link.keepaliveInterval) (Link.crossed now)
+  where
+    now = 1000
+    later = now + Link.keepaliveInterval
 
 -- | Both ends this node's own: the request one sends, the path the
 -- other serves, and the answer filed under the id of the packet that
