@@ -1,5 +1,6 @@
 module Main (main) where
 
+import qualified Codec.Compression.BZip as BZip
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
 import Control.Monad (when)
@@ -7,6 +8,7 @@ import Data.Bits (xor)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
+import qualified Data.ByteString.Lazy as Lazy
 import Data.Either (rights)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
@@ -25,6 +27,7 @@ import qualified Reticulum.Packet as Packet
 import Reticulum.Path (Time (Time))
 import qualified Reticulum.Path as Path
 import qualified Reticulum.Request as Request
+import qualified Reticulum.Resource as Resource
 import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
@@ -46,6 +49,8 @@ checks =
     , ("a packet sealed for another key is not taken", notOpened)
     , ("a link this node answers takes what crosses it and proves it", linkAnswered)
     , ("a request on a link is answered on the path it names", requestAnswered)
+    , ("a resource is taken in parts and proved", resourceTaken False)
+    , ("a resource that is compressed is taken", resourceTaken True)
     , ("a path response is not queued", pure notQueued)
     , ("an announce goes out twice", pure emptiedTwice)
     , ("a rebroadcast heard once is counted", pure counted)
@@ -426,7 +431,7 @@ emitting node =
     Node.serve node (Destination.name carried) B.empty quiet >>= Node.announce node
 
 quiet :: Node.Answering
-quiet = Node.Answering (const (pure ())) Map.empty
+quiet = Node.Answering (const (pure ())) (const (pure ())) Map.empty
 
 waitFor :: IO (Maybe a) -> IO (Maybe a)
 waitFor look = go (60 :: Int)
@@ -698,6 +703,98 @@ requestAnswered = do
                     _ -> Left "the request was not answered"
   where
     echo = C.pack "echo"
+
+chunks :: Int -> ByteString -> [ByteString]
+chunks size bytes
+    | B.null bytes = []
+    | otherwise = B.take size bytes : chunks size (B.drop size bytes)
+
+advertising :: Bool -> ByteString -> ByteString -> ByteString -> [ByteString] -> ByteString
+advertising compress hash salt stream pieces =
+    Msgpack.pack
+        ( Msgpack.Map
+            [ (Msgpack.Text (C.pack "t"), Msgpack.Unsigned (fromIntegral (B.length stream)))
+            , (Msgpack.Text (C.pack "d"), Msgpack.Unsigned (fromIntegral (B.length stream)))
+            , (Msgpack.Text (C.pack "n"), Msgpack.Unsigned (fromIntegral (length pieces)))
+            , (Msgpack.Text (C.pack "h"), Msgpack.Bytes hash)
+            , (Msgpack.Text (C.pack "r"), Msgpack.Bytes salt)
+            , (Msgpack.Text (C.pack "o"), Msgpack.Bytes hash)
+            , (Msgpack.Text (C.pack "i"), Msgpack.Unsigned 1)
+            , (Msgpack.Text (C.pack "l"), Msgpack.Unsigned 1)
+            , (Msgpack.Text (C.pack "f"), Msgpack.Unsigned (if compress then 3 else 1))
+            , (Msgpack.Text (C.pack "m"), Msgpack.Bytes (B.concat (map (mapHash salt) pieces)))
+            ]
+        )
+
+mapHash :: ByteString -> ByteString -> ByteString
+mapHash salt piece =
+    B.take Resource.mapHashLength (Identity.fullHash (piece <> salt))
+
+-- | The far side of a resource: what it advertised, and the parts it
+-- hands over one window of requests at a time.
+feeding :: Opened -> ByteString -> [ByteString] -> IO ()
+feeding open salt pieces = go 0 (length pieces)
+  where
+    go _ 0 = pure ()
+    go round' left = do
+        seen <- nth (openedBack open) ((== Packet.ResourceReq) . Packet.context) round'
+        case seen >>= (Link.opened (openedKeys open) . Packet.payload) of
+            Nothing -> pure ()
+            Just plain -> case Resource.partRequest plain of
+                Left _ -> pure ()
+                Right wanted -> do
+                    let hashes = chunks Resource.mapHashLength (Resource.requestedHashes wanted)
+                        sending = [piece | piece <- pieces, mapHash salt piece `elem` hashes]
+                    mapM_ (Node.send (openedNear open) . onTheLink (openedLink open) Packet.Resource) sending
+                    go (round' + 1) (max 0 (left - length sending))
+
+nth :: IO [ByteString] -> (Packet.Packet -> Bool) -> Int -> IO (Maybe Packet.Packet)
+nth reader wanted place = waitFor (found <$> reader)
+  where
+    found = listToMaybe . drop place . filter wanted . rights . map Packet.unpack
+
+resourceTaken :: Bool -> IO (Either String ())
+resourceTaken compress = do
+    took <- newIORef []
+    let keeping plain = atomicModifyIORef' took (\kept -> (kept ++ [plain], ()))
+    begun <- linked quiet {Node.assembled = keeping}
+    case begun of
+        Left reason -> pure (Left reason)
+        Right open -> case Link.sealed (openedKeys open) vector (prefix <> inside) of
+            Nothing -> pure (Left "the stream was not sealed")
+            Just stream -> do
+                let pieces = chunks (Link.partSize 500) stream
+                    told = advertising compress hash salt stream pieces
+                case Link.sealed (openedKeys open) vector told of
+                    Nothing -> pure (Left "the advertisement was not sealed")
+                    Just sealed -> do
+                        Node.send
+                            (openedNear open)
+                            (onTheLink (openedLink open) Packet.ResourceAdv sealed)
+                        feeding open salt pieces
+                        proved <- awaited (openedBack open) ((== Packet.ResourcePrf) . Packet.context)
+                        arrived <- readIORef took
+                        pure $ do
+                            expect "the parts the stream was cut into" (parts compress) (length pieces)
+                            expect "what the resource carried" [body] arrived
+                            case proved of
+                                Nothing -> Left "no resource proof came back"
+                                Just proof ->
+                                    expect
+                                        "what the proof carries"
+                                        (hash <> Identity.fullHash (body <> hash))
+                                        (Packet.payload proof)
+  where
+    body = C.pack (concat (replicate 100 "the whole resource, in parts. "))
+    inside = if compress then packing body else body
+    salt = B.replicate Resource.randomHashLength 0x21
+    prefix = B.replicate Resource.randomHashLength 0x22
+    hash = Identity.fullHash (body <> salt)
+    parts True = 1
+    parts False = 7
+
+packing :: ByteString -> ByteString
+packing = Lazy.toStrict . BZip.compress . Lazy.fromStrict
 
 crossing :: Opened -> ByteString -> IO (Maybe (Packet.Packet, Maybe ByteString))
 crossing open plain = case Link.sealed (openedKeys open) vector plain of

@@ -35,6 +35,7 @@ library
                      Reticulum.Transport
     build-depends:   base        >=4.17 && <5
                    , bytestring
+                   , bzlib
                    , containers
                    , crypton
                    , memory
@@ -67,5 +68,6 @@ test-suite test
     main-is:        Main.hs
     build-depends:  base
                   , bytestring
+                  , bzlib
                   , containers
                   , reticulum

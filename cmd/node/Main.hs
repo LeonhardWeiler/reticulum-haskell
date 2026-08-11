@@ -113,6 +113,7 @@ announcing node name = do
     served =
         Node.Answering
             { Node.delivered = \plain -> putStrLn (unwords ["took", show plain])
+            , Node.assembled = \plain -> putStrLn (unwords ["took", show (B.length plain), "bytes"])
             , Node.requested = Map.singleton (Request.named (C.pack "echo")) (pure . Just)
             }
 

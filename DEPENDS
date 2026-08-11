@@ -4,6 +4,9 @@ cryptography library, and what needs each.
     crypton      the cryptography library: SHA-256, Ed25519, X25519,
                  AES-256-CBC, HMAC-SHA-256
 
+    bzlib        a resource carries its data compressed when that is
+                 shorter, and this is the decompressor
+
     network      the TCP interface's socket, and the address it is
                  dialled at
 

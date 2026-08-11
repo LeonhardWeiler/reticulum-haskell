@@ -20,7 +20,9 @@ module Reticulum.Link
     , identifyValid
     , mode
     , mtu
+    , transmissionUnit
     , capacity
+    , partSize
     , linkId
     , publicKeysLength
     , signallingSize
@@ -193,20 +195,24 @@ mode signalled = case B.uncons =<< signalled of
 mtu :: Maybe ByteString -> Maybe Int
 mtu = fmap ((.&. mtuBytemask) . bigEndian)
 
+transmissionUnit :: Maybe ByteString -> Int
+transmissionUnit = fromMaybe defaultUnit . mtu
+
+defaultUnit :: Int
+defaultUnit = 500
+
 -- | The whole transmission unit less the header, the token around the
 -- plaintext and the byte an interface may take, rounded down to the
 -- block the padding fills.
-capacity :: Maybe ByteString -> Int
-capacity signalled = whole `div` Token.blockSize * Token.blockSize - 1
+capacity :: Int -> Int
+capacity unit = whole `div` Token.blockSize * Token.blockSize - 1
   where
-    whole =
-        fromMaybe transmissionUnit (mtu signalled)
-            - accessCodeSize
-            - Packet.headerLength Packet.Header1
-            - Token.tokenOverhead
+    whole = unit - accessCodeSize - Packet.headerLength Packet.Header1 - Token.tokenOverhead
 
-transmissionUnit :: Int
-transmissionUnit = 500
+-- | One part of a resource is measured against the longest header a
+-- packet can carry, whether it carries one or not.
+partSize :: Int -> Int
+partSize unit = unit - accessCodeSize - Packet.headerLength Packet.Header2
 
 accessCodeSize :: Int
 accessCodeSize = 1
