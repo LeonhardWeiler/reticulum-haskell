@@ -127,9 +127,12 @@ says node.out "packet proved"
 says node.out "answer \"say it back\""
 says node.out "answer \"4000\""
 says node.out "resource proved"
+says node.out "closed the link"
+says node.out "link closed"
 says hold.out "link established"
 says hold.out "took b'over the link'"
 says hold.out "resource concluded: 3000"
+says hold.out "link closed"
 
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

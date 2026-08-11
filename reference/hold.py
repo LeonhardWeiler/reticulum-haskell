@@ -1,6 +1,6 @@
 """The side the node dials: a destination it holds, the link and the
-packets it answers, the two paths it serves, and the resource it takes
-in."""
+packets it answers, the two paths it serves, the resource it takes in,
+and the close the node writes when it is done."""
 
 import sys
 import time
@@ -23,10 +23,15 @@ def concluded(resource):
     print("resource concluded:", len(resource.data.read()), flush=True)
 
 
+def gone(link):
+    print("link closed", flush=True)
+
+
 def established(link):
     link.set_resource_strategy(RNS.Link.ACCEPT_ALL)
     link.set_packet_callback(took)
     link.set_resource_concluded_callback(concluded)
+    link.set_link_closed_callback(gone)
     print("link established", flush=True)
 
 

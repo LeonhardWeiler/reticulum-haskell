@@ -1,6 +1,6 @@
 """The side that talks to the node itself: a path it asks for, a packet
-it proves, a link it answers, the requests it serves, and a resource it
-takes in."""
+it proves, a link it answers, the requests it serves, a resource it
+takes in, and the close it writes at the end."""
 
 import os
 import sys
