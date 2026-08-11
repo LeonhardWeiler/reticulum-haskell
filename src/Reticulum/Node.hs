@@ -47,6 +47,7 @@ import qualified Reticulum.Link as Link
 import Reticulum.Packet (Packet (Packet))
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Path as Path
+import qualified Reticulum.Request as Request
 import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
@@ -68,9 +69,11 @@ data Settings = Settings
     { transport :: Bool
     }
 
--- | What a destination of this node's own does with what arrives for it.
+-- | What a destination of this node's own does with what arrives for
+-- it, and what it answers on each path it serves.
 data Answering = Answering
     { delivered :: ByteString -> IO ()
+    , requested :: Map ByteString (ByteString -> IO (Maybe ByteString))
     }
 
 data Local = Local
@@ -85,6 +88,7 @@ data Session = Session
     { keys :: Token.Keys
     , at :: Interface
     , since :: Path.Time
+    , holds :: Int
     , serving :: Local
     , identified :: Maybe Identity.PublicKey
     }
@@ -206,15 +210,17 @@ opening node through held packet = case Link.request (Packet.payload packet) of
             case Link.answered (identity node) ephemeral link wanted of
                 Left reason -> hPutStrLn stderr ("link: " ++ reason)
                 Right (shook, body) -> do
-                    modifyMVar_ (sessions node) (pure . Map.insert link (begun shook now))
+                    let signalled = Link.requestSignalling wanted
+                    modifyMVar_ (sessions node) (pure . Map.insert link (begun shook now signalled))
                     transmit through (Packet.pack (written body))
   where
     link = Link.linkId packet
-    begun shook now =
+    begun shook now signalled =
         Session
             { keys = Link.keys shook
             , at = through
             , since = now
+            , holds = Link.capacity signalled
             , serving = held
             , identified = Nothing
             }
@@ -249,6 +255,7 @@ spoken node through session packet
             Packet.None -> mapM_ took (opened (Packet.payload packet))
             Packet.LinkIdentify -> mapM_ names (opened (Packet.payload packet))
             Packet.LinkClose -> mapM_ closes (opened (Packet.payload packet))
+            Packet.Request -> mapM_ (asking session packet) (opened (Packet.payload packet))
             _ -> pure ()
   where
     link = Packet.address packet
@@ -273,6 +280,35 @@ alive = 0xff
 
 awake :: ByteString
 awake = B.singleton 0xfe
+
+-- | The request is answered under the id of the packet that asked, and
+-- a path this destination does not serve is not answered at all.
+asking :: Session -> Packet -> ByteString -> IO ()
+asking session packet plain = case Request.request plain of
+    Left _ -> pure ()
+    Right wanted -> case served =<< Request.pathHash wanted of
+        Nothing -> pure ()
+        Just answering -> do
+            given <- answering (fromMaybe B.empty (Request.requestBody wanted))
+            mapM_ (responding session (Packet.address packet) identifier) given
+  where
+    served path = Map.lookup path (requested (answers (serving session)))
+    identifier = Identity.truncatedHash (Packet.hashablePart packet)
+
+-- | An answer that does not fit in one packet on this link is not one
+-- this node can send.
+responding :: Session -> ByteString -> ByteString -> ByteString -> IO ()
+responding session link identifier body
+    | B.length packed > holds session =
+        hPutStrLn stderr ("response: " ++ show (B.length packed) ++ " bytes")
+    | otherwise = do
+        vector <- Entropy.getEntropy Token.blockSize
+        case Link.sealed (keys session) vector packed of
+            Nothing -> hPutStrLn stderr "response: nothing was sealed"
+            Just sealed ->
+                transmit (at session) (Packet.pack (onLink link Packet.Data Packet.Response sealed))
+  where
+    packed = Request.packResponse identifier body
 
 -- | A proof on a link carries the hash it proves, which one from a
 -- destination does not.
@@ -551,9 +587,9 @@ answer node through wanted = do
 requestPath :: Node -> DestinationHash -> IO ()
 requestPath node destination = do
     tag <- Entropy.getEntropy Packet.addressLength
-    send node (asking tag)
+    send node (wanting tag)
   where
-    asking tag =
+    wanting tag =
         Packet
             { Packet.contextFlag = False
             , Packet.transportType = Packet.Broadcast

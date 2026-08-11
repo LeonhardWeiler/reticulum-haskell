@@ -8,6 +8,7 @@ import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
+import qualified Data.Map.Strict as Map
 import Data.Maybe (isNothing)
 import System.Environment (getArgs, getProgName)
 import System.Exit (exitFailure)
@@ -19,6 +20,7 @@ import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Interface.Tcp as Tcp
 import qualified Reticulum.Node as Node
 import qualified Reticulum.Path as Path
+import qualified Reticulum.Request as Request
 
 data Options = Options
     { forwarding :: Bool
@@ -99,14 +101,20 @@ delivered node holder raw = do
     through <- readMVar holder
     Node.inbound node through raw
 
+-- | The one path the node serves answers with what it was asked, so
+-- the far end can tell the answer came from the request it sent.
 announcing :: Node.Node -> ByteString -> IO ()
 announcing node name = do
     threadDelay (2 * 1000 * 1000)
-    destination <- Node.serve node (Destination.name name) B.empty (Node.Answering took)
+    destination <- Node.serve node (Destination.name name) B.empty served
     putStrLn (unwords ["serving", hex (Destination.destinationHashBytes destination)])
     Node.announce node destination
   where
-    took plain = putStrLn (unwords ["took", show plain])
+    served =
+        Node.Answering
+            { Node.delivered = \plain -> putStrLn (unwords ["took", show plain])
+            , Node.requested = Map.singleton (Request.named (C.pack "echo")) (pure . Just)
+            }
 
 announced
     :: Destination.DestinationHash

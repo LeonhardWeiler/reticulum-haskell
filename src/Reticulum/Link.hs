@@ -20,6 +20,7 @@ module Reticulum.Link
     , identifyValid
     , mode
     , mtu
+    , capacity
     , linkId
     , publicKeysLength
     , signallingSize
@@ -191,6 +192,24 @@ mode signalled = case B.uncons =<< signalled of
 
 mtu :: Maybe ByteString -> Maybe Int
 mtu = fmap ((.&. mtuBytemask) . bigEndian)
+
+-- | The whole transmission unit less the header, the token around the
+-- plaintext and the byte an interface may take, rounded down to the
+-- block the padding fills.
+capacity :: Maybe ByteString -> Int
+capacity signalled = whole `div` Token.blockSize * Token.blockSize - 1
+  where
+    whole =
+        fromMaybe transmissionUnit (mtu signalled)
+            - accessCodeSize
+            - Packet.headerLength Packet.Header1
+            - Token.tokenOverhead
+
+transmissionUnit :: Int
+transmissionUnit = 500
+
+accessCodeSize :: Int
+accessCodeSize = 1
 
 bigEndian :: ByteString -> Int
 bigEndian = B.foldl' (\value byte -> (value `shiftL` 8) .|. fromIntegral byte) 0

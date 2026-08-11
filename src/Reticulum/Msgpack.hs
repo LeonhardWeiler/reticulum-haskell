@@ -3,14 +3,15 @@
 module Reticulum.Msgpack
     ( Value (..)
     , unpack
+    , pack
     , element
     , entry
     ) where
 
-import Data.Bits (shiftL, (.&.), (.|.))
+import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import Data.Word (Word64)
+import Data.Word (Word64, Word8)
 
 data Value
     = Nil
@@ -26,6 +27,47 @@ data Value
 -- whole plaintext to a reader that returns one value and discards them.
 unpack :: ByteString -> Maybe Value
 unpack = fmap fst . value
+
+-- | The shortest form a value fits in is the one written, which is what
+-- a reader on the other side compares against.
+pack :: Value -> ByteString
+pack Nil = B.singleton 0xc0
+pack (Unsigned count)
+    | count < 0x80 = B.singleton (fromIntegral count)
+    | count <= 0xff = marked 0xcc 1 count
+    | count <= 0xffff = marked 0xcd 2 count
+    | count <= 0xffffffff = marked 0xce 4 count
+    | otherwise = marked 0xcf 8 count
+pack (Float bytes) = B.singleton 0xcb <> bytes
+pack (Bytes bytes) = prefixed 0xc4 0xc5 0xc6 bytes <> bytes
+pack (Text bytes)
+    | B.length bytes < 0x20 = B.singleton (0xa0 .|. fromIntegral (B.length bytes)) <> bytes
+    | otherwise = prefixed 0xd9 0xda 0xdb bytes <> bytes
+pack (Array values) = counting 0x90 0xdc 0xdd (length values) <> B.concat (map pack values)
+pack (Map keyed) =
+    counting 0x80 0xde 0xdf (length keyed)
+        <> B.concat [pack key <> pack held | (key, held) <- keyed]
+
+marked :: Word8 -> Int -> Word64 -> ByteString
+marked marker width count = B.singleton marker <> bigEndianOf width count
+
+prefixed :: Word8 -> Word8 -> Word8 -> ByteString -> ByteString
+prefixed one two four bytes
+    | size <= 0xff = marked one 1 (fromIntegral size)
+    | size <= 0xffff = marked two 2 (fromIntegral size)
+    | otherwise = marked four 4 (fromIntegral size)
+  where
+    size = B.length bytes
+
+counting :: Word8 -> Word8 -> Word8 -> Int -> ByteString
+counting fixed two four count
+    | count < 0x10 = B.singleton (fixed .|. fromIntegral count)
+    | count <= 0xffff = marked two 2 (fromIntegral count)
+    | otherwise = marked four 4 (fromIntegral count)
+
+bigEndianOf :: Int -> Word64 -> ByteString
+bigEndianOf width count =
+    B.pack [fromIntegral (count `shiftR` (8 * place)) | place <- [width - 1, width - 2 .. 0]]
 
 element :: Int -> Value -> Maybe Value
 element index (Array values) = case drop index values of

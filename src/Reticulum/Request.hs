@@ -5,11 +5,14 @@ module Reticulum.Request
     , request
     , Response (..)
     , response
+    , packResponse
+    , named
     ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 
+import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Msgpack as Msgpack
 import Reticulum.Packet (Rejection (ShortPlaintext))
 
@@ -41,6 +44,15 @@ response plain
     | otherwise = Right (Response (binary packed 0) (binary packed 1))
   where
     packed = Msgpack.unpack plain
+
+packResponse :: ByteString -> ByteString -> ByteString
+packResponse identifier body =
+    Msgpack.pack (Msgpack.Array [Msgpack.Bytes identifier, Msgpack.Bytes body])
+
+-- | A path is carried as the hash of the bytes of its name and never as
+-- the name.
+named :: ByteString -> ByteString
+named = Identity.truncatedHash
 
 float :: Maybe Msgpack.Value -> Int -> Maybe ByteString
 float packed index = case Msgpack.element index =<< packed of

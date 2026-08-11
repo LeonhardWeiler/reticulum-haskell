@@ -19,10 +19,12 @@ import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Link as Link
+import qualified Reticulum.Msgpack as Msgpack
 import qualified Reticulum.Node as Node
 import qualified Reticulum.Packet as Packet
 import Reticulum.Path (Time (Time))
 import qualified Reticulum.Path as Path
+import qualified Reticulum.Request as Request
 import qualified Reticulum.Token as Token
 import qualified Reticulum.Transport as Transport
 
@@ -43,6 +45,7 @@ checks =
     , ("a packet for a destination of this node's own is taken and proved", takenAndProved)
     , ("a packet sealed for another key is not taken", notOpened)
     , ("a link this node answers takes what crosses it and proves it", linkAnswered)
+    , ("a request on a link is answered on the path it names", requestAnswered)
     , ("a path response is not queued", pure notQueued)
     , ("an announce goes out twice", pure emptiedTwice)
     , ("a rebroadcast heard once is counted", pure counted)
@@ -423,7 +426,7 @@ emitting node =
     Node.serve node (Destination.name carried) B.empty quiet >>= Node.announce node
 
 quiet :: Node.Answering
-quiet = Node.Answering (const (pure ()))
+quiet = Node.Answering (const (pure ())) Map.empty
 
 waitFor :: IO (Maybe a) -> IO (Maybe a)
 waitFor look = go (60 :: Int)
@@ -518,7 +521,7 @@ serving node = do
     took <- newIORef []
     _ <-
         Node.serve node (Destination.name carried) B.empty $
-            Node.Answering (\plain -> atomicModifyIORef' took (\kept -> (kept ++ [plain], ())))
+            quiet {Node.delivered = \plain -> atomicModifyIORef' took (\kept -> (kept ++ [plain], ()))}
     pure (readIORef took)
 
 takenAndProved :: IO (Either String ())
@@ -589,12 +592,22 @@ theOtherEnd = do
     key <- either (ioError . userError) pure (Identity.toPublic secret)
     pure (secret, key)
 
-linkAnswered :: IO (Either String ())
-linkAnswered = do
+-- | A link opened against a node that answers one: the id both ends
+-- computed, the keys both derived, and the way back from the far side.
+data Opened = Opened
+    { openedLink :: ByteString
+    , openedKeys :: Token.Keys
+    , openedNear :: Node.Node
+    , openedBack :: IO [ByteString]
+    , openedKey :: Identity.PublicKey
+    }
+
+linked :: Node.Answering -> IO (Either String Opened)
+linked answering = do
     (near, _, _) <- started False
     (far, secret, emitter) <- started False
     (_, backToNear) <- tap "one" near far
-    took <- serving far
+    _ <- Node.serve far (Destination.name carried) B.empty answering
     key <- either (ioError . userError) pure (Identity.toPublic secret)
     (initiator, ephemeral) <- theOtherEnd
     let wanting =
@@ -605,20 +618,34 @@ linkAnswered = do
         link = Link.linkId wanting
     Node.send near wanting
     given <- awaited backToNear ((== Packet.LinkRequestProof) . Packet.context)
-    case given >>= (either (const Nothing) Just . Link.requestProof . Packet.payload) of
-        Nothing -> pure (Left "the link request was not answered")
-        Just body -> case sealing initiator link body of
-            Nothing -> pure (Left "the handshake made no keys")
+    pure $ case given >>= (either (const Nothing) Just . Link.requestProof . Packet.payload) of
+        Nothing -> Left "the link request was not answered"
+        Just body
+            | not (Link.signatureValid link (Identity.ed25519Public key) body) ->
+                Left "the link proof is not signed by the destination"
+            | otherwise ->
+                case Link.handshake (Identity.x25519Private initiator) (Link.responderPublic body) link of
+                    Nothing -> Left "the handshake made no keys"
+                    Just shook -> Right (Opened link (Link.keys shook) near backToNear key)
+
+linkAnswered :: IO (Either String ())
+linkAnswered = do
+    took <- newIORef []
+    let keeping plain = atomicModifyIORef' took (\kept -> (kept ++ [plain], ()))
+    begun <- linked quiet {Node.delivered = keeping}
+    case begun of
+        Left reason -> pure (Left reason)
+        Right open -> case Link.sealed (openedKeys open) vector overTheLink of
+            Nothing -> pure (Left "nothing was sealed for the link")
             Just sealed -> do
-                let sent = onTheLink link Packet.None sealed
-                Node.send near sent
-                proved <- awaited backToNear delivery
-                Node.send near (onTheLink link Packet.Keepalive (B.singleton 0xff))
-                back <- awaited backToNear ((== Packet.Keepalive) . Packet.context)
-                arrived <- took
+                let link = openedLink open
+                    sent = onTheLink link Packet.None sealed
+                Node.send (openedNear open) sent
+                proved <- awaited (openedBack open) delivery
+                Node.send (openedNear open) (onTheLink link Packet.Keepalive (B.singleton 0xff))
+                back <- awaited (openedBack open) ((== Packet.Keepalive) . Packet.context)
+                arrived <- readIORef took
                 pure $ do
-                    require "the link proof is not signed by the destination" $
-                        Link.signatureValid link (Identity.ed25519Public key) body
                     expect "what crossed the link" [overTheLink] arrived
                     case proved of
                         Nothing -> Left "no proof came back"
@@ -628,17 +655,58 @@ linkAnswered = do
                             expect "the link the proof is on" link (Packet.address proof)
                             expect "the hash the proof carries" hash carries
                             require "the proof is not signed by the destination" $
-                                Identity.validate key hash signed
+                                Identity.validate (openedKey open) hash signed
                     case back of
                         Nothing -> Left "the keepalive was not answered"
                         Just awake -> expect "what came back" (B.singleton 0xfe) (Packet.payload awake)
   where
     delivery packet =
         Packet.packetType packet == Packet.Proof && Packet.context packet == Packet.None
-    sealing initiator link body = do
-        shook <-
-            Link.handshake (Identity.x25519Private initiator) (Link.responderPublic body) link
-        Link.sealed (Link.keys shook) vector overTheLink
+
+asked :: ByteString -> ByteString -> ByteString
+asked path body =
+    Msgpack.pack
+        ( Msgpack.Array
+            [ Msgpack.Float (B.replicate 8 0)
+            , Msgpack.Bytes (Request.named path)
+            , Msgpack.Bytes body
+            ]
+        )
+
+requestAnswered :: IO (Either String ())
+requestAnswered = do
+    begun <- linked quiet {Node.requested = Map.singleton (Request.named echo) (pure . Just . B.reverse)}
+    case begun of
+        Left reason -> pure (Left reason)
+        Right open -> do
+            unanswered <- crossing open (asked (C.pack "nothing") spoken)
+            answered <- crossing open (asked echo spoken)
+            pure $ do
+                expect "the answer to a path that is not served" Nothing (snd =<< unanswered)
+                case answered of
+                    Just (sent, Just plain) -> case Request.response plain of
+                        Left _ -> Left "the answer did not read back"
+                        Right given -> do
+                            expect
+                                "the request the answer names"
+                                (Just (Identity.truncatedHash (Packet.hashablePart sent)))
+                                (Request.requestId given)
+                            expect
+                                "what the answer carries"
+                                (Just (B.reverse spoken))
+                                (Request.responseBody given)
+                    _ -> Left "the request was not answered"
+  where
+    echo = C.pack "echo"
+
+crossing :: Opened -> ByteString -> IO (Maybe (Packet.Packet, Maybe ByteString))
+crossing open plain = case Link.sealed (openedKeys open) vector plain of
+    Nothing -> pure Nothing
+    Just sealed -> do
+        let sent = onTheLink (openedLink open) Packet.Request sealed
+        Node.send (openedNear open) sent
+        given <- awaited (openedBack open) ((== Packet.Response) . Packet.context)
+        pure (Just (sent, Link.opened (openedKeys open) . Packet.payload =<< given))
 
 throughTheMiddle :: IO (Either String ())
 throughTheMiddle = do
@@ -711,8 +779,8 @@ linkThroughTheMiddle = do
         Nothing -> pure (Left "the path to the far node was not learned")
         Just _ -> do
             Node.send near (opening (addressOf emitter))
-            asked <- awaited towardFar ((== Packet.LinkRequest) . Packet.packetType)
-            case asked of
+            wanted <- awaited towardFar ((== Packet.LinkRequest) . Packet.packetType)
+            case wanted of
                 Nothing -> pure (Left "the link request did not cross")
                 Just request -> case answer secret request of
                     Left reason -> pure (Left ("the proof was not made: " ++ reason))
