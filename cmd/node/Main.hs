@@ -24,26 +24,32 @@ main = do
     hSetBuffering stdout LineBuffering
     arguments <- getArgs
     case arguments of
-        [host, port] -> run host port Nothing Nothing
-        [host, port, called] -> run host port (Just (C.pack called)) Nothing
-        [host, port, called, file] -> run host port (Just (C.pack called)) (Just file)
-        _ -> usage
+        ("-t" : rest) -> dispatch True rest
+        rest -> dispatch False rest
+
+dispatch :: Bool -> [String] -> IO ()
+dispatch forwarding arguments = case arguments of
+    [host, port] -> run forwarding host port Nothing Nothing
+    [host, port, called] -> run forwarding host port (Just (C.pack called)) Nothing
+    [host, port, called, file] ->
+        run forwarding host port (Just (C.pack called)) (Just file)
+    _ -> usage
 
 usage :: IO a
 usage = do
     called <- getProgName
-    stop (unlines [called ++ " <host> <port> [<destination name> [<identity file>]]"])
+    stop (unlines [called ++ " [-t] <host> <port> [<destination name> [<identity file>]]"])
 
-run :: String -> String -> Maybe ByteString -> Maybe FilePath -> IO ()
-run host port called file = do
+run :: Bool -> String -> String -> Maybe ByteString -> Maybe FilePath -> IO ()
+run forwarding host port called file = do
     private <- secret file
     key <- either stop pure (Identity.toPublic private)
     putStrLn (unwords ["identity", hex (Identity.identityHashBytes (Identity.identityHash key))])
-    started <- Node.start private announced
+    started <- Node.start Node.Settings {Node.transport = forwarding} private announced
     node <- either stop pure started
     holder <- newEmptyMVar
     tcp <- Tcp.start (Tcp.Peer host port) (delivered node holder)
-    let through = Node.Interface (host ++ ":" ++ port) (Tcp.transmit tcp)
+    through <- Node.interface (host ++ ":" ++ port) (Tcp.transmit tcp)
     putMVar holder through
     Node.attach node through
     mapM_ (announcing node) called

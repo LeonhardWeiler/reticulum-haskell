@@ -1,9 +1,13 @@
 {-# LANGUAGE StrictData #-}
 
 module Reticulum.Node
-    ( Interface (..)
+    ( Interface (name, transmit)
+    , interface
+    , same
+    , Settings (..)
     , Node
     , start
+    , stop
     , attach
     , inbound
     , send
@@ -13,8 +17,9 @@ module Reticulum.Node
     , keypair
     ) where
 
+import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
-import Control.Monad (when)
+import Control.Monad (forever, when)
 import qualified Crypto.Random.Entropy as Entropy
 import Data.Bits (shiftR, testBit)
 import Data.ByteString (ByteString)
@@ -24,6 +29,7 @@ import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Unique (Unique, newUnique)
 import Data.Word (Word64)
 import System.IO (hPutStrLn, stderr)
 
@@ -37,38 +43,64 @@ import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Path as Path
 import qualified Reticulum.Transport as Transport
 
+-- | Two interfaces of the same name are two of them, so what tells them
+-- apart is handed out once and never read.
 data Interface = Interface
     { name :: String
     , transmit :: ByteString -> IO ()
+    , token :: Unique
+    }
+
+interface :: String -> (ByteString -> IO ()) -> IO Interface
+interface named write = Interface named write <$> newUnique
+
+same :: Interface -> Interface -> Bool
+same one other = token one == token other
+
+data Settings = Settings
+    { transport :: Bool
     }
 
 data Node = Node
     { identity :: Identity.PrivateKey
     , ours :: ByteString
+    , settings :: Settings
     , attached :: MVar [Interface]
     , table :: MVar (Path.Table Interface)
+    , waiting :: MVar (Transport.Waiting Interface)
     , seen :: MVar (Set ByteString)
     , local :: MVar (Set DestinationHash)
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
+    , sweeper :: Maybe ThreadId
     }
 
 start
-    :: Identity.PrivateKey
+    :: Settings
+    -> Identity.PrivateKey
     -> (DestinationHash -> Announce -> Path.Path Interface -> IO ())
     -> IO (Either String Node)
-start private handler = case Identity.toPublic private of
+start how private handler = case Identity.toPublic private of
     Left reason -> pure (Left reason)
     Right key -> do
         node <-
-            Node private (Identity.identityHashBytes (Identity.identityHash key))
+            Node private (Identity.identityHashBytes (Identity.identityHash key)) how
                 <$> newMVar []
+                <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Set.empty
                 <*> newMVar Set.empty
-        pure (Right (node handler))
+        let built = node handler Nothing
+        if transport how
+            then do
+                thread <- forkIO (forever (threadDelay sweepInterval >> sweep built))
+                pure (Right built {sweeper = Just thread})
+            else pure (Right built)
+
+stop :: Node -> IO ()
+stop = maybe (pure ()) killThread . sweeper
 
 attach :: Node -> Interface -> IO ()
-attach node interface = modifyMVar_ (attached node) (pure . (++ [interface]))
+attach node through = modifyMVar_ (attached node) (pure . (++ [through]))
 
 paths :: Node -> IO (Path.Table Interface)
 paths = readMVar . table
@@ -106,8 +138,13 @@ announced node through packet = case Announce.announce packet of
             mine <- readMVar (local node)
             when (destination `Set.notMember` mine) $ do
                 now <- clock
+                forwarding node (modifyMVar_ (waiting node) (pure . Transport.overheard now packet))
                 learned <- modifyMVar (table node) (pure . took now (entry carried))
-                mapM_ (heard node destination carried) learned
+                case learned of
+                    Nothing -> pure ()
+                    Just path -> do
+                        forwarding node (queue node now through packet)
+                        heard node destination carried path
   where
     address = Packet.address packet
     destination = DestinationHash address
@@ -122,6 +159,42 @@ announced node through packet = case Announce.announce packet of
             , Path.announceHash = Packet.packetHash packet
             , Path.through = through
             }
+
+forwarding :: Node -> IO () -> IO ()
+forwarding node action = when (transport (settings node)) action
+
+queue :: Node -> Path.Time -> Interface -> Packet -> IO ()
+queue node now through packet = do
+    across <- spread
+    case Transport.queued now across through packet of
+        Nothing -> pure ()
+        Just entry ->
+            modifyMVar_
+                (waiting node)
+                (pure . Map.insert (DestinationHash (Packet.address packet)) entry)
+
+sweepInterval :: Int
+sweepInterval = 1000 * 1000
+
+sweep :: Node -> IO ()
+sweep node = do
+    now <- clock
+    sending <- modifyMVar (waiting node) (pure . swapped . Transport.due now)
+    mapM_ (rebroadcast node) sending
+  where
+    swapped (sending, kept) = (kept, sending)
+
+-- | The one interface an announce is not carried back onto is the one it
+-- was heard on.
+rebroadcast :: Node -> Transport.Pending Interface -> IO ()
+rebroadcast node entry = do
+    interfaces <- readMVar (attached node)
+    mapM_ (\through -> transmit through raw) (targets interfaces)
+  where
+    raw = Packet.pack (Transport.rebroadcast (ours node) entry)
+    targets interfaces = case Transport.toward entry of
+        Just one -> [one]
+        Nothing -> filter (not . same (Transport.arrived entry)) interfaces
 
 send :: Node -> Packet -> IO ()
 send node packet = do
@@ -167,6 +240,13 @@ keypair :: IO Identity.PrivateKey
 keypair = do
     bytes <- Entropy.getEntropy Identity.keySize
     either (ioError . userError) pure (Identity.privateKey bytes)
+
+spread :: IO Double
+spread = do
+    bytes <- Entropy.getEntropy 1
+    pure $ case B.unpack bytes of
+        [byte] -> Transport.window * fromIntegral byte / 256
+        _ -> 0
 
 stampLength :: Int
 stampLength = 5
