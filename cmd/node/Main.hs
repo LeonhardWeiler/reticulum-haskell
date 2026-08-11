@@ -101,8 +101,8 @@ delivered node holder raw = do
     through <- readMVar holder
     Node.inbound node through raw
 
--- | The one path the node serves answers with what it was asked, so
--- the far end can tell the answer came from the request it sent.
+-- | One path answers with what it was asked and the other with how much
+-- that was, so a request too long to answer in one packet has a path.
 announcing :: Node.Node -> ByteString -> IO ()
 announcing node name = do
     threadDelay (2 * 1000 * 1000)
@@ -113,9 +113,14 @@ announcing node name = do
     served =
         Node.Answering
             { Node.delivered = \plain -> putStrLn (unwords ["took", show plain])
-            , Node.assembled = \plain -> putStrLn (unwords ["took", show (B.length plain), "bytes"])
-            , Node.requested = Map.singleton (Request.named (C.pack "echo")) (pure . Just)
+            , Node.assembled = \plain -> putStrLn (unwords ["assembled", show (B.length plain), "bytes"])
+            , Node.requested =
+                Map.fromList
+                    [ (Request.named (C.pack "echo"), pure . Just)
+                    , (Request.named (C.pack "length"), pure . Just . counted)
+                    ]
             }
+    counted plain = C.pack (show (B.length plain))
 
 announced
     :: Destination.DestinationHash

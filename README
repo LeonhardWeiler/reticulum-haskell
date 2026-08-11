@@ -54,7 +54,7 @@ Layout
     cmd/harness/       the corpus harness, linked to ./harness by check
     cmd/node/          a node on TCP interfaces, dialled and answered
     test/              what the corpus cannot hold
-    reference/         this node between two python-rns nodes
+    reference/         this node with python-rns nodes around it
     .github/workflows/ one job, and it runs ./check
     CLAUDE.md          the rules this repository is written under
     CORPUS             the pin
@@ -86,7 +86,7 @@ The node
 
     -t          be a transport node
     -l <port>   listen, and take every connection as an interface
-    -n <name>   announce this destination once
+    -n <name>   hold this destination, and announce it once
     -k <file>   the identity, written if the file is not there
 
 Dials every peer given and answers on the port given, and prints a line
@@ -108,6 +108,15 @@ taken only when it was emitted later than the one on file, and an
 announce the table keeps nothing of is one nothing above it hears
 about.
 
+A destination the node holds is a destination it answers for. A packet
+addressed to it is opened and proved. A link request is answered, and
+on the link that opens, a packet is taken and proved, a keepalive is
+answered, an identify is remembered, and a close ends it. A resource is
+taken part by part, checked against the hash it was advertised under
+and proved. Two request paths are served: echo answers with what it was
+asked, and length with how many bytes that was, which is the answer a
+request too long for one packet gets.
+
 
 Tests
 
@@ -115,18 +124,24 @@ Tests
 
 There are none here that a vector already proves. What belongs here is
 what the corpus cannot hold: properties, and the layers above link.
-Today that is the transport node: the rules its tables follow, and
+Today that is the transport node and what a destination answers: the
+rules the tables follow, the token in the direction that encrypts, and
 nodes wired to each other in memory, one carrying what another
-announced, opening a link across it and proving what crossed.
+announced, opening a link across it, proving what crossed, and
+answering a link, a request and a resource of its own.
 
     ./reference/check
 
 is the same node between two python-rns nodes that cannot reach each
-other any other way. It needs python-rns importable, takes about two
-minutes, and is not run in CI. Six lines are checked: this node hears
+other any other way, and a third that talks to the node itself. It
+needs python-rns importable, takes about two and a half minutes, and is
+not run in CI. Fifteen lines are checked. Through the node: it hears
 the announce, the far side has no path and then has one two hops away,
 a packet across it is proved, a link opens, and what is said over that
-link arrives.
+link arrives. To the node: a path it answers for itself, a packet it
+proves, a link it answers, a packet on that link it proves, a request
+it serves, a request too long for one packet that arrives as a resource
+and is answered from it, and a resource it takes whole.
 
 
 License

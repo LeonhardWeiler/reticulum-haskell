@@ -209,15 +209,12 @@ checkout is not committed.
 
 # Open
 
-Every kind the corpus holds passes, in both directions, and a transport
-node carries what two reference nodes say to each other: an announce, a
-path request answered from what it kept, a packet and its proof, and a
-link opened across it. What the corpus cannot measure is what is left:
+Every kind the corpus holds passes, in both directions. A transport
+node carries what two reference nodes say to each other, and a
+destination of this node's own answers for itself: a packet it proves,
+a link it answers, a request it serves, a resource it takes. What is
+left is the same layers in the other direction:
 
-    the layers above       what a node does with a packet addressed to
-                           a destination of its own: a link it answers,
-                           a resource it takes, a request it serves
-
-And the question that was open before it:
-
-    Whether harness lives here or in the corpus under conformance/.
+    the initiator          a link this node opens, a request it sends,
+                           a resource it hands over, and the answer too
+                           long for one packet that needs one

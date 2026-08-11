@@ -1,10 +1,12 @@
 #!/bin/sh
 #
-# reference/check - this node between two python-rns nodes.
+# reference/check - this node between two python-rns nodes, and a third
+# that talks to the node itself.
 #
-# Neither side can reach the other except through the node built here,
-# and every line printed is one of them saying it got there. Needs
-# python-rns importable and takes about two minutes.
+# Neither of the first two can reach the other except through the node
+# built here, and the third speaks to a destination the node holds. Every
+# line printed is one of them saying it got there. Needs python-rns
+# importable and takes about two and a half minutes.
 #
 # The corpus is what says compatible. This says the node speaks.
 
@@ -13,6 +15,7 @@ set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 left=42021
 right=42022
+third=42023
 announce_after=12
 
 work=$(mktemp -d)
@@ -55,6 +58,7 @@ EOF
 
 instance far $left
 instance near $right
+instance talk $third
 
 python3 "$root/reference/announce.py" "$work/far" "$announce_after" \
 	> "$work/far.out" 2> "$work/far.err" &
@@ -63,17 +67,23 @@ running="$running $!"
 # Both sides are dialled: the far one is up, the near one is not, and
 # the node keeps knocking until it is.
 sleep 2
-"$node" -t -k "$work/node.key" 127.0.0.1:$left 127.0.0.1:$right \
+"$node" -t -n haskell.check -k "$work/node.key" \
+	127.0.0.1:$left 127.0.0.1:$right 127.0.0.1:$third \
 	> "$work/node.out" 2> "$work/node.err" &
 running="$running $!"
 
 sleep $((announce_after + 12))
 destination=$(head -1 "$work/far.out")
+serving=$(sed -n 's/^serving //p' "$work/node.out" | head -1)
 
 python3 "$root/reference/ask.py" "$work/near" "$destination" \
 	> "$work/near.out" 2> "$work/near.err" &
 running="$running $!"
-sleep 60
+
+python3 "$root/reference/talk.py" "$work/talk" "$serving" \
+	> "$work/talk.out" 2> "$work/talk.err" &
+running="$running $!"
+sleep 90
 
 passed=0
 failed=0
@@ -93,6 +103,15 @@ says near.out "has path: True hops: 2"
 says near.out "packet proved: True"
 says near.out "link active: True"
 says far.out "heard on the link: over the link"
+says talk.out "has path: True"
+says talk.out "packet proved: True"
+says talk.out "link active: True"
+says talk.out "link packet proved: True"
+says talk.out "response: b'say it back'"
+says talk.out "request as resource: b'4000'"
+says talk.out "resource concluded: True"
+says node.out "took \"one packet\""
+says node.out "assembled 3000 bytes"
 
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]
