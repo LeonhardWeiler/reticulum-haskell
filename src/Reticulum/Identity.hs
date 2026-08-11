@@ -19,6 +19,7 @@ module Reticulum.Identity
     , truncatedHash
     , keySize
     , truncatedHashLength
+    , nameHashLength
     ) where
 
 import Crypto.Error (CryptoFailable (CryptoFailed, CryptoPassed))
@@ -36,6 +37,10 @@ keySize = 512 `div` 8
 -- | RNS/Reticulum.py#TRUNCATED_HASHLENGTH, in bytes.
 truncatedHashLength :: Int
 truncatedHashLength = 128 `div` 8
+
+-- | RNS/Identity.py#NAME_HASH_LENGTH, in bytes. Ten, not sixteen.
+nameHashLength :: Int
+nameHashLength = 80 `div` 8
 
 -- | RNS/Identity.py#full_hash
 fullHash :: ByteString -> ByteString

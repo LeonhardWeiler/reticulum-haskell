@@ -9,6 +9,7 @@ import qualified Data.ByteString.Char8 as C
 import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (ExitFailure), die, exitWith)
 
+import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
 
 main :: IO ()
@@ -20,25 +21,32 @@ main = do
             case dump kind blobs of
                 -- Rule 3. Nothing else may use this status.
                 Nothing -> exitWith (ExitFailure 77)
-                Just fields -> mapM_ (putStrLn . render) fields
+                Just (Left reason) -> die (path ++ ": " ++ reason)
+                Just (Right fields) -> mapM_ (putStrLn . render) fields
         ("-e" : _) -> die "the encode direction is not implemented"
         _ -> do
             name <- getProgName
             die ("usage: " ++ name ++ " <kind> <rawfile>")
 
-dump :: String -> [Maybe ByteString] -> Maybe [Field]
+-- | Nothing for a kind this harness does not implement, Left for a raw
+-- that does not carry what the kind is defined to hold. The second is a
+-- broken vector, not a measurement.
+dump :: String -> [Maybe ByteString] -> Maybe (Either String [Field])
 dump kind blobs = case kind of
-    "identity" -> Just (identity (blobs `at` 0))
-    "keyset" -> Just (keyset (blobs `at` 0))
+    "identity" -> Just (identity <$> blob 0 "public key")
+    "keyset" -> Just (keyset <$> blob 0 "private key")
+    "destination" -> Just (destination <$> blob 0 "name" <*> pure (blobs `at` 1))
     _ -> Nothing
+  where
+    blob index what = maybe (Left ("raw carries no " ++ what)) Right (blobs `at` index)
 
 -- | corpus doc/identity, vector format: identity.
-identity :: Maybe ByteString -> [Field]
-identity raw = gated (Identity.publicKey =<< present "public key" raw) publicKeyFields
+identity :: ByteString -> [Field]
+identity raw = gated (Identity.publicKey raw) publicKeyFields
 
 -- | corpus doc/identity, vector format: keyset. The public half is
 -- gated a second time, on the derivation rather than on the blob.
-keyset :: Maybe ByteString -> [Field]
+keyset :: ByteString -> [Field]
 keyset raw =
     gated key
         [ ("private_key", Hex . Identity.privateKeyBytes)
@@ -47,7 +55,7 @@ keyset raw =
         ]
         ++ gated (Identity.toPublic =<< key) publicKeyFields
   where
-    key = Identity.privateKey =<< present "private key" raw
+    key = Identity.privateKey raw
 
 publicKeyFields :: [(String, Identity.PublicKey -> Value)]
 publicKeyFields =
@@ -56,6 +64,25 @@ publicKeyFields =
     , ("ed25519_public", Hex . Identity.ed25519Public)
     , ("identity_hash", Hex . Identity.identityHashBytes . Identity.identityHash)
     ]
+
+-- | corpus doc/destination. The second blob is the identity hash, and
+-- a name has none as often as it has one. identity_hash is that blob
+-- echoed: it is an input here, not something derived.
+destination :: ByteString -> Maybe ByteString -> [Field]
+destination rawName rawIdentity =
+    [ ("name", Hex (Destination.nameBytes name))
+    , ("app_name", Hex (Destination.appName name))
+    ]
+        ++ [("aspect", Hex aspect) | aspect <- Destination.aspects name]
+        ++ [ ("name_hash", Hex (Destination.nameHashBytes hash))
+           , ("identity_hash", maybe Absent (Hex . Identity.identityHashBytes) holder)
+           , ("destination_hash", Hex (Destination.destinationHashBytes address))
+           ]
+  where
+    name = Destination.name rawName
+    hash = Destination.nameHash name
+    holder = Identity.IdentityHash <$> rawIdentity
+    address = Destination.destinationHash hash holder
 
 -- Fields
 
@@ -69,7 +96,7 @@ type Field = (String, Value)
 -- it does not gate still stand.
 gated :: Either e a -> [(String, a -> Value)] -> [Field]
 gated (Left _) fields = [(name, Absent) | (name, _) <- fields]
-gated (Right value) fields = [(name, render' value) | (name, render') <- fields]
+gated (Right value) fields = [(name, of' value) | (name, of') <- fields]
 
 -- | Rule 5, in the one place it belongs: the name in 18 columns, the
 -- value after it, and the empty byte string as a dash because hex
@@ -100,6 +127,3 @@ at :: [Maybe ByteString] -> Int -> Maybe ByteString
 at blobs index = case drop index blobs of
     (blob : _) -> blob
     [] -> Nothing
-
-present :: String -> Maybe ByteString -> Either String ByteString
-present what = maybe (Left ("raw carries no " ++ what)) Right

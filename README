@@ -10,10 +10,10 @@ below is the whole claim.
 
 Where it stands
 
-    12 passed, 0 failed, corpus 72746484, 92 skipped
+    20 passed, 0 failed, corpus 72746484, 84 skipped
 
-identity, keyset. The kinds not implemented are skipped and named on
-that line; see the corpus's doc/harness, rule 3.
+identity, keyset, destination. The kinds not implemented are skipped
+and named on that line; see the corpus's doc/harness, rule 3.
 
 
 Build
