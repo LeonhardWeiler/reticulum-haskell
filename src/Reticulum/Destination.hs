@@ -3,7 +3,6 @@
 module Reticulum.Destination
     ( Name (nameBytes, appName, aspects)
     , name
-    , fromComponents
     , NameHash (..)
     , nameHash
     , DestinationHash (..)
@@ -31,13 +30,6 @@ name bytes = case B.split dot bytes of
     -- An empty name has an empty app name and no aspects.
     [] -> Name bytes B.empty []
     (app : rest) -> Name bytes app rest
-
-fromComponents :: ByteString -> [ByteString] -> Either String Name
-fromComponents app parts
-    | any (B.elem dot) components = Left "dots can't be used in app names or aspects"
-    | otherwise = Right (Name (B.intercalate (B.singleton dot) components) app parts)
-  where
-    components = app : parts
 
 newtype NameHash = NameHash {nameHashBytes :: ByteString}
 

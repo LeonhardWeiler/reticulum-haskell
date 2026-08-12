@@ -5,18 +5,15 @@ module Reticulum.Interface.Tcp
     , label
     , Tcp (..)
     , start
-    , Server (..)
     , serve
-    , hardwareMtu
     ) where
 
-import Control.Concurrent (forkIO, killThread, threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, withMVar)
 import Control.Exception (IOException, bracketOnError, catch, try)
-import Control.Monad (forever, unless, void, when)
+import Control.Monad (forever, unless, void)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Network.Socket as Net
 import Network.Socket
     ( AddrInfo (addrAddress, addrFamily, addrFlags, addrSocketType)
@@ -60,51 +57,30 @@ data Peer = Peer
 label :: Peer -> String
 label peer = host peer ++ ":" ++ port peer
 
-data Tcp = Tcp
+newtype Tcp = Tcp
     { transmit :: ByteString -> IO ()
-    , detach :: IO ()
     }
 
 -- | The socket is dialled, read and dialled again by the one thread,
--- and the interface is the pair of things another thread may do to it.
+-- and the interface is what another thread may do to it.
 start :: Peer -> (ByteString -> IO ()) -> IO Tcp
 start peer deliver = do
     held <- newMVar Nothing
-    running <- newIORef True
-    _ <- forkIO (dialling peer held running deliver)
-    pure
-        Tcp
-            { transmit = writing (label peer) held . Hdlc.framed
-            , detach = do
-                writeIORef running False
-                shut held
-            }
+    _ <- forkIO (forever (dialling peer held deliver))
+    pure Tcp {transmit = writing (label peer) held . Hdlc.framed}
 
-dialling :: Peer -> MVar (Maybe Socket) -> IORef Bool -> (ByteString -> IO ()) -> IO ()
-dialling peer held running deliver = loop
-  where
-    loop = do
-        alive <- readIORef running
-        when alive (attempt >> loop)
-
-    attempt = do
-        dialled <- try (dial peer)
-        case dialled of
-            Left failure -> do
-                note (label peer) ("no connection: " ++ show (failure :: IOException))
-                threadDelay reconnectWait
-            Right established -> do
-                modifyMVar_ held (const (pure (Just established)))
-                outcome <- try (reading established deliver)
-                modifyMVar_ held (const (pure Nothing))
-                quiet (close established)
-                again <- readIORef running
-                when again $ do
-                    note (label peer) (ending outcome)
-                    threadDelay reconnectWait
-
-    ending (Left failure) = "socket failed: " ++ show (failure :: IOException)
-    ending (Right ()) = "socket closed"
+dialling :: Peer -> MVar (Maybe Socket) -> (ByteString -> IO ()) -> IO ()
+dialling peer held deliver = do
+    dialled <- try (dial peer)
+    case dialled of
+        Left failure -> note (label peer) ("no connection: " ++ show (failure :: IOException))
+        Right established -> do
+            modifyMVar_ held (const (pure (Just established)))
+            outcome <- try (reading established deliver)
+            modifyMVar_ held (const (pure Nothing))
+            quiet (close established)
+            note (label peer) (ending outcome)
+    threadDelay reconnectWait
 
 dial :: Peer -> IO Socket
 dial peer = do
@@ -146,8 +122,9 @@ writing named held raw = withMVar held sending
             note named ("transmit failed: " ++ show (failure :: IOException))
             quiet (shutdown established ShutdownBoth)
 
-shut :: MVar (Maybe Socket) -> IO ()
-shut held = withMVar held (mapM_ (\established -> quiet (shutdown established ShutdownBoth)))
+ending :: Either IOException () -> String
+ending (Left failure) = "socket failed: " ++ show failure
+ending (Right ()) = "socket closed"
 
 quiet :: IO () -> IO ()
 quiet action = void (try action :: IO (Either IOException ()))
@@ -155,18 +132,13 @@ quiet action = void (try action :: IO (Either IOException ()))
 note :: String -> String -> IO ()
 note named message = hPutStrLn stderr (concat ["tcp ", named, ": ", message])
 
-newtype Server = Server
-    { unbind :: IO ()
-    }
-
 -- | Every connection accepted is its own interface, and the caller says
 -- what reads it and what to do when it ends before the first byte
 -- arrives.
-serve :: ServiceName -> (String -> Tcp -> IO (ByteString -> IO (), IO ())) -> IO Server
+serve :: ServiceName -> (String -> Tcp -> IO (ByteString -> IO (), IO ())) -> IO ()
 serve service accepted = do
     listening <- bound service
-    thread <- forkIO (forever (taking listening))
-    pure Server {unbind = killThread thread >> quiet (close listening)}
+    void (forkIO (forever (taking listening)))
   where
     taking listening = do
         (established, address) <- Net.accept listening
@@ -177,20 +149,12 @@ serve service accepted = do
         setSocketOption established KeepAlive 1
         held <- newMVar (Just established)
         (deliver, ended) <-
-            accepted
-                named
-                Tcp
-                    { transmit = writing named held . Hdlc.framed
-                    , detach = shut held
-                    }
+            accepted named Tcp {transmit = writing named held . Hdlc.framed}
         outcome <- try (reading established deliver)
         modifyMVar_ held (const (pure Nothing))
         quiet (close established)
         note named (ending outcome)
         ended
-
-    ending (Left failure) = "socket failed: " ++ show (failure :: IOException)
-    ending (Right ()) = "socket closed"
 
 bound :: ServiceName -> IO Socket
 bound service = do

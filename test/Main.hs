@@ -195,7 +195,6 @@ onePath at away =
         , Path.updated = Time 0
         , Path.expires = Time 100
         , Path.blobs = []
-        , Path.state = Path.Unknown
         , Path.announced = B.empty
         , Path.interface = at
         }

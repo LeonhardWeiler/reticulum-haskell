@@ -2,8 +2,6 @@
 
 module Reticulum.Proof
     ( Proof (..)
-    , Form (..)
-    , form
     , proof
     , pack
     , hashMatch
@@ -26,18 +24,10 @@ implicitLength = Identity.signatureLength
 explicitLength :: Int
 explicitLength = 32 + Identity.signatureLength
 
-data Form = Implicit | Explicit
-    deriving (Eq)
-
 data Proof = Proof
     { provedHash :: Maybe ByteString
     , signature :: ByteString
     }
-
--- | The longer of the two lengths is the hash being there, so the form
--- is not a second thing to carry.
-form :: Proof -> Form
-form = maybe Implicit (const Explicit) . provedHash
 
 proof :: ByteString -> Either Rejection Proof
 proof payload

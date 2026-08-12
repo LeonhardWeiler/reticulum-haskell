@@ -437,7 +437,7 @@ proof provedRaw signerKey raw =
     signerEd = either (const signerKey) Identity.ed25519Public (Identity.publicKey signerKey)
 
     fields unpacked value =
-        [ ("form", Keyword (case Proof.form value of Proof.Implicit -> "implicit"; Proof.Explicit -> "explicit"))
+        [ ("form", Keyword (maybe "implicit" (const "explicit") (Proof.provedHash value)))
         , ("packet_hash", either (const Absent) Hex computed)
         , ("proof_hash", maybe Absent Hex (Proof.provedHash value))
         , ("hash_match", either (const Absent) (\hash -> verdict (Proof.hashMatch hash value)) computed)

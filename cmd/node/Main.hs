@@ -3,7 +3,7 @@ module Main (main) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar)
 import Control.Exception (IOException, try)
-import Control.Monad (forever, void)
+import Control.Monad (forever)
 import Data.ByteArray.Encoding (Base (Base16), convertFromBase, convertToBase)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
@@ -93,7 +93,7 @@ dialled node peer = do
     Node.attach node through
 
 answering :: Node.Node -> String -> IO ()
-answering node port = void (Tcp.serve port accepted)
+answering node port = Tcp.serve port accepted
   where
     accepted named connection = do
         holder <- newEmptyMVar

@@ -2,19 +2,12 @@
 
 module Reticulum.Path
     ( Time (..)
-    , State (..)
     , Heard (..)
     , Path (..)
     , Table
     , learn
-    , forget
-    , mark
     , shorten
     , expired
-    , hopsTo
-    , timebase
-    , lifetime
-    , maximumBlobs
     ) where
 
 import Data.ByteString (ByteString)
@@ -24,7 +17,6 @@ import qualified Data.Map.Strict as Map
 import Data.Word (Word64, Word8)
 
 import Reticulum.Destination (DestinationHash)
-import Reticulum.Packet (pathfinderM)
 
 newtype Time = Time {seconds :: Double}
     deriving (Eq, Ord)
@@ -34,9 +26,6 @@ lifetime = 60 * 60 * 24 * 7
 
 maximumBlobs :: Int
 maximumBlobs = 64
-
-data State = Unknown | Unresponsive | Responsive
-    deriving (Eq)
 
 -- | An announce as the table takes it: where it came from and the ten
 -- bytes that say which announce it is.
@@ -54,7 +43,6 @@ data Path i = Path
     , updated :: Time
     , expires :: Time
     , blobs :: [ByteString]
-    , state :: State
     , announced :: ByteString
     , interface :: i
     }
@@ -78,7 +66,6 @@ learn now destination heard table = case Map.lookup destination table of
             , updated = now
             , expires = Time (seconds now + lifetime)
             , blobs = remembered kept (blob heard)
-            , state = Unknown
             , announced = announceHash heard
             , interface = through heard
             }
@@ -89,9 +76,7 @@ replaces :: Time -> Heard i -> Path i -> Bool
 replaces now heard old
     | travelled heard <= hops old = unheard && emitted > timebaseOf (blobs old)
     | expires old <= now = unheard
-    | emitted > reached = unheard
-    | emitted == reached = state old == Unresponsive
-    | otherwise = False
+    | otherwise = emitted > reached && unheard
   where
     unheard = blob heard `notElem` blobs old
     emitted = timebase (blob heard)
@@ -126,17 +111,8 @@ remembered kept new
   where
     grown = kept ++ [new]
 
-forget :: DestinationHash -> Table i -> Table i
-forget = Map.delete
-
-mark :: State -> DestinationHash -> Table i -> Table i
-mark reach = Map.adjust (\path -> path {state = reach})
-
 shorten :: Word8 -> DestinationHash -> Table i -> Table i
 shorten away = Map.adjust (\path -> path {hops = away})
 
 expired :: Time -> Path i -> Bool
 expired now path = expires path <= now
-
-hopsTo :: DestinationHash -> Table i -> Word8
-hopsTo destination = maybe (fromIntegral pathfinderM) hops . Map.lookup destination
