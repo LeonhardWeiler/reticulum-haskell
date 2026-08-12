@@ -27,6 +27,8 @@ library
                      Reticulum.Link
                      Reticulum.Msgpack
                      Reticulum.Node
+                     Reticulum.Node.State
+                     Reticulum.Node.Transfer
                      Reticulum.Packet
                      Reticulum.Path
                      Reticulum.Proof
