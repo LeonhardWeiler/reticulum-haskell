@@ -48,15 +48,15 @@ import qualified Reticulum.Link as Link
 import qualified Reticulum.Msgpack as Msgpack
 import Reticulum.Node.State
 import Reticulum.Node.Transfer
-    ( advertised
-    , asking
-    , forgotten
-    , giving
+    ( onAdvertisement
+    , onRequestPacket
+    , onCancel
+    , sendParts
     , hand
-    , handed
-    , moving
-    , piece
-    , updated
+    , handOver
+    , afterSegment
+    , takePart
+    , onHashmapUpdate
     )
 import Reticulum.Packet (Packet (Packet))
 import qualified Reticulum.Packet as Packet
@@ -94,14 +94,14 @@ inbound node through raw
     | maybe True (\(flags, _) -> testBit flags 7) (B.uncons raw) = pure ()
     | otherwise = case Packet.unpack raw of
         Left _ -> pure ()
-        Right packet -> taken node through (Transport.counted packet)
+        Right packet -> admit node through (Transport.counted packet)
 
-taken :: Node -> Interface -> Packet -> IO ()
-taken node through packet = do
+admit :: Node -> Interface -> Packet -> IO ()
+admit node through packet = do
     crossings <- links <$> tables node
     now <- clock
     allowed <- change node (\was -> let (kept, out) = filtered crossings now (seen was) in (was {seen = kept}, out))
-    when allowed (sorted node through packet)
+    when allowed (dispatch node through packet)
   where
     filtered crossings now hashes
         | not verdict = (hashes, False)
@@ -111,35 +111,35 @@ taken node through packet = do
       where
         verdict = Transport.admitted (ours node) hashes packet
 
-sorted :: Node -> Interface -> Packet -> IO ()
-sorted node through packet
-    | Packet.packetType packet == Packet.Announce = announced node through packet
-    | Packet.address packet == Transport.pathRequestAddress = asked node through packet
+dispatch :: Node -> Interface -> Packet -> IO ()
+dispatch node through packet
+    | Packet.packetType packet == Packet.Announce = onAnnounce node through packet
+    | Packet.address packet == Transport.pathRequestAddress = onPathRequest node through packet
     | otherwise = do
         now <- tables node
         case Map.lookup (DestinationHash (Packet.address packet)) (local now) of
-            Just held -> arrived node through held packet
+            Just mine' -> deliver node through mine' packet
             Nothing -> case Map.lookup (Packet.address packet) (sessions now) of
-                Just session -> spoken node through session packet
+                Just session -> onLinkPacket node through session packet
                 Nothing -> case Map.lookup (Packet.address packet) (pending now) of
-                    Just wanted -> proven node through wanted packet
+                    Just wanted -> linkProved node through wanted packet
                     Nothing -> forwarding node (relay node through packet)
 
 -- | A packet for a destination of this node's own goes no further.
-arrived :: Node -> Interface -> Local -> Packet -> IO ()
-arrived node through held packet
-    | Packet.packetType packet == Packet.LinkRequest = opening node through held packet
+deliver :: Node -> Interface -> Local -> Packet -> IO ()
+deliver node through mine packet
+    | Packet.packetType packet == Packet.LinkRequest = answerLink node through mine packet
     | Packet.packetType packet /= Packet.Data = pure ()
     | Packet.destinationType packet /= Packet.Single = pure ()
     | otherwise = case unsealed node (Packet.payload packet) of
         Nothing -> pure ()
         Just plain -> do
-            delivered (answers held) plain
+            delivered (answers mine) plain
             prove node through packet
 
 -- | Only the one mode this end derives keys for is answered.
-opening :: Node -> Interface -> Local -> Packet -> IO ()
-opening node through held packet = case Link.request (Packet.payload packet) of
+answerLink :: Node -> Interface -> Local -> Packet -> IO ()
+answerLink node through mine packet = case Link.request (Packet.payload packet) of
     Left _ -> pure ()
     Right wanted
         | Link.mode (Link.requestSignalling wanted) /= Link.modeAes256Cbc -> pure ()
@@ -161,7 +161,7 @@ opening node through held packet = case Link.request (Packet.payload packet) of
             , opener = False
             , unit = Link.transmissionUnit (Link.requestSignalling wanted)
             , signer = Link.ed25519Public wanted
-            , answering = answers held
+            , answering = answers mine
             , identified = Nothing
             , taking = Map.empty
             , handing = Map.empty
@@ -173,19 +173,19 @@ opening node through held packet = case Link.request (Packet.payload packet) of
 
 -- | A link packet that arrives on another interface than the one the
 -- link was answered on is not on that link.
-spoken :: Node -> Interface -> Session -> Packet -> IO ()
-spoken node through session packet
+onLinkPacket :: Node -> Interface -> Session -> Packet -> IO ()
+onLinkPacket node through session packet
     | through /= at session = pure ()
     | otherwise = do
         now <- clock
-        onSessions node (Map.adjust (came now) link)
+        onSession node link (came now)
         case Packet.packetType packet of
             Packet.Data -> data'
             Packet.Proof -> proof'
             _ -> pure ()
   where
     link = Packet.address packet
-    came now held = held {traffic = (traffic held) {Link.inbound = Path.seconds now}}
+    came now session' = session' {traffic = (traffic session') {Link.inbound = Path.seconds now}}
     opened = Link.opened (keys session)
     proof' = case Packet.context packet of
         Packet.None -> witnessed
@@ -196,15 +196,15 @@ spoken node through session packet
         Packet.None -> mapM_ took (opened (Packet.payload packet))
         Packet.LinkIdentify -> mapM_ names (opened (Packet.payload packet))
         Packet.LinkClose -> mapM_ closes (opened (Packet.payload packet))
-        Packet.Request -> mapM_ (asking node session packet) (opened (Packet.payload packet))
+        Packet.Request -> mapM_ (onRequestPacket node session packet) (opened (Packet.payload packet))
         Packet.Response -> mapM_ given (opened (Packet.payload packet))
-        Packet.ResourceAdv -> mapM_ (advertised node session link) (opened (Packet.payload packet))
-        Packet.ResourceReq -> mapM_ (giving node session link) (opened (Packet.payload packet))
-        Packet.Resource -> piece node session link (Packet.payload packet)
-        Packet.ResourceHmu -> mapM_ (updated node session link) (opened (Packet.payload packet))
-        Packet.ResourceIcl -> mapM_ (forgotten node link) (opened (Packet.payload packet))
+        Packet.ResourceAdv -> mapM_ (onAdvertisement node session link) (opened (Packet.payload packet))
+        Packet.ResourceReq -> mapM_ (sendParts node session link) (opened (Packet.payload packet))
+        Packet.Resource -> takePart node session link (Packet.payload packet)
+        Packet.ResourceHmu -> mapM_ (onHashmapUpdate node session link) (opened (Packet.payload packet))
+        Packet.ResourceIcl -> mapM_ (onCancel node link) (opened (Packet.payload packet))
         _ -> pure ()
-    awakening = writing node session (onLink link Packet.Data Packet.Keepalive awake)
+    awakening = writeOnLink node session (onLink link Packet.Data Packet.Keepalive awake)
     took plain = do
         delivered (answering session) plain
         proveOnLink node session packet
@@ -224,12 +224,12 @@ spoken node through session packet
         Left _ -> pure ()
         Right written -> do
             done <- withSessions node (dropping written)
-            mapM_ (moving node session link) done
+            mapM_ (afterSegment node session link) done
     dropping written running = case Map.lookup link running of
-        Just held
-            | Just gone <- Map.lookup (Resource.provedResource written) (handing held)
+        Just session'
+            | Just gone <- Map.lookup (Resource.provedResource written) (handing session')
             , Resource.concluded written gone ->
-                ( Map.insert link held {handing = Map.delete (Resource.given gone) (handing held)} running
+                ( Map.insert link session' {handing = Map.delete (Resource.given gone) (handing session')} running
                 , Just gone
                 )
         _ -> (running, Nothing)
@@ -238,9 +238,9 @@ spoken node through session packet
             | Link.identifyValid link who ->
                 onSessions
                     node
-                    (Map.adjust (\held -> held {identified = Just (Link.identityPublic who)}) link)
+                    (Map.adjust (\session' -> session' {identified = Just (Link.identityPublic who)}) link)
         _ -> pure ()
-    closes plain = when (plain == link) (ending node session link)
+    closes plain = when (plain == link) (endLink node session link)
 
 -- | The one packet on a link that carries no token, and the two bytes
 -- that are the whole exchange.
@@ -253,8 +253,8 @@ awake = B.singleton 0xfe
 
 -- | A link that ends is one nothing more crosses, and the end that held
 -- it hears so once.
-ending :: Node -> Session -> ByteString -> IO ()
-ending node session link = do
+endLink :: Node -> Session -> ByteString -> IO ()
+endLink node session link = do
     was <- withSessions node (swapped . Map.updateLookupWithKey forget link)
     mapM_ (const (closed (answering session))) was
   where
@@ -268,7 +268,7 @@ close node link = do
     case Map.lookup link running of
         Nothing -> pure ()
         Just session -> do
-            _ <- sending node session link Packet.LinkClose link
+            _ <- sendSealed node session link Packet.LinkClose link
             onSessions node (Map.delete link)
 
 -- | A proof on a link carries the hash it proves, which one from a
@@ -277,7 +277,7 @@ proveOnLink :: Node -> Session -> Packet -> IO ()
 proveOnLink node session packet = case Identity.sign (identity node) hash of
     Left reason -> hPutStrLn stderr ("proof: " ++ reason)
     Right signed ->
-        writing node session (onLink (Packet.address packet) Packet.Proof Packet.None (hash <> signed))
+        writeOnLink node session (onLink (Packet.address packet) Packet.Proof Packet.None (hash <> signed))
   where
     hash = Packet.packetHash packet
 
@@ -307,8 +307,8 @@ prove node through packet = case Identity.sign (identity node) hash of
             , Packet.payload = signed
             }
 
-announced :: Node -> Interface -> Packet -> IO ()
-announced node through packet = case Announce.announce packet of
+onAnnounce :: Node -> Interface -> Packet -> IO ()
+onAnnounce node through packet = case Announce.announce packet of
     Left _ -> pure ()
     Right carried
         | not (Announce.destinationMatch address carried) -> pure ()
@@ -363,7 +363,7 @@ relay node through packet = do
             alter node (\was -> was {links = Transport.crossing now through path packet (links was)})
             transmit (Path.interface path) (Packet.pack onward)
         Nothing
-            | Packet.context packet == Packet.LinkRequestProof -> settled node through packet
+            | Packet.context packet == Packet.LinkRequestProof -> relayLinkProof node through packet
             | Packet.packetType packet == Packet.Proof -> do
                 back <- change node (\was -> let (out, kept) = Transport.returned through packet (returns was) in (was {returns = kept}, out))
                 mapM_ (\out -> transmit out (Packet.pack packet)) back
@@ -377,15 +377,15 @@ relay node through packet = do
 
 -- | The proof for a link this node is in the middle of is checked with
 -- the key the announce for that destination carried.
-settled :: Node -> Interface -> Packet -> IO ()
-settled node through packet = do
+relayLinkProof :: Node -> Interface -> Packet -> IO ()
+relayLinkProof node through packet = do
     cached <- announces <$> tables node
     outcome <-
         change node (\was -> let (out, kept) = Transport.proofed (valid cached) through packet (links was) in (was {links = kept}, out))
     case outcome of
         Nothing -> pure ()
         Just crossed -> do
-            mapM_ (adjusted node) (Transport.rebalanced crossed)
+            mapM_ (shortenPath node) (Transport.rebalanced crossed)
             transmit (Transport.back crossed) (Packet.pack packet)
   where
     valid cached destination = case Map.lookup destination cached of
@@ -400,8 +400,8 @@ settled node through packet = do
                         (Identity.ed25519Public (Announce.publicKey carried))
                         proof
 
-adjusted :: Node -> (DestinationHash, Word8) -> IO ()
-adjusted node (destination, away) =
+shortenPath :: Node -> (DestinationHash, Word8) -> IO ()
+shortenPath node (destination, away) =
     alter node (\was -> was {table = Path.shorten away destination (table was)})
 
 sweepInterval :: Int
@@ -422,23 +422,23 @@ sweep node = do
     reachable <- change node (\was -> let kept = Map.filter (not . Path.expired now) (table was) in (was {table = kept}, kept))
     alter node (\was -> was {announces = (`Map.intersection` reachable) (announces was)})
     running <- sessions <$> tables node
-    mapM_ (timed node now interfaces) (Map.toList running)
+    mapM_ (checkLink node now interfaces) (Map.toList running)
 
 -- | The end that opened the link is the end that wakes it, and a link
 -- nothing has come in on for two intervals is one either end closes; one
 -- whose interface is gone cannot be told about it.
-timed :: Node -> Path.Time -> [Interface] -> (ByteString, Session) -> IO ()
-timed node now interfaces (link, session)
-    | at session `notElem` interfaces = ending node session link
+checkLink :: Node -> Path.Time -> [Interface] -> (ByteString, Session) -> IO ()
+checkLink node now interfaces (link, session)
+    | at session `notElem` interfaces = endLink node session link
     | Link.stale (Path.seconds now) (traffic session) =
         close node link >> closed (answering session)
     | opener session && Link.waking (Path.seconds now) (traffic session) = waken
     | otherwise = pure ()
   where
     waken = do
-        writing node session (onLink link Packet.Data Packet.Keepalive (B.singleton alive))
-        onSessions node (Map.adjust woke link)
-    woke held = held {traffic = (traffic held) {Link.woken = Path.seconds now}}
+        writeOnLink node session (onLink link Packet.Data Packet.Keepalive (B.singleton alive))
+        onSession node link woke
+    woke session' = session' {traffic = (traffic session') {Link.woken = Path.seconds now}}
 
 -- was heard on.
 rebroadcast :: Node -> Transport.Pending Interface -> IO ()
@@ -462,12 +462,12 @@ send node packet = do
 
 serve :: Node -> Name -> ByteString -> Answering -> IO DestinationHash
 serve node called carried hears = do
-    alter node (\was -> was {local = Map.insert destination held (local was)})
+    alter node (\was -> was {local = Map.insert destination mine (local was)})
     pure destination
   where
     hash = Destination.nameHash called
-    destination = whose node hash
-    held = Local {nameHash = hash, appData = carried, answers = hears}
+    destination = ownDestination node hash
+    mine = Local {nameHash = hash, appData = carried, answers = hears}
 
 -- | The key the link is asked for is the one the announce for that
 -- destination carried, and a destination nothing was heard from cannot
@@ -518,8 +518,8 @@ requesting toward point =
 
 -- | The link is open once the proof is signed by the destination, and
 -- the round trip that goes back is what the far end waits for.
-proven :: Node -> Interface -> Opening -> Packet -> IO ()
-proven node through wanted packet
+linkProved :: Node -> Interface -> Opening -> Packet -> IO ()
+linkProved node through wanted packet
     | Packet.packetType packet /= Packet.Proof = pure ()
     | Packet.context packet /= Packet.LinkRequestProof = pure ()
     | otherwise = case Link.requestProof (Packet.payload packet) of
@@ -533,7 +533,7 @@ proven node through wanted packet
                     let session = begun shook now body
                     onSessions node (Map.insert link session)
                     alter node (\was -> was {pending = Map.delete link (pending was)})
-                    void (sending node session link Packet.LinkRtt (roundTrip (elapsed now)))
+                    void (sendSealed node session link Packet.LinkRtt (roundTrip (elapsed now)))
   where
     link = Packet.address packet
     key = Identity.ed25519Public (theirs wanted)
@@ -566,7 +566,7 @@ speak node link plain = do
     running <- sessions <$> tables node
     case Map.lookup link running of
         Nothing -> pure Nothing
-        Just session -> fmap Packet.packetHash <$> sending node session link Packet.None plain
+        Just session -> fmap Packet.packetHash <$> sendSealed node session link Packet.None plain
 
 -- | The answer names the packet that asked, so what comes back is the
 -- id that end will hash out of it.
@@ -581,24 +581,24 @@ ask node link path body = do
   where
     wanting' session packed
         | B.length packed > Link.capacity (unit session) =
-            Just identifier <$ handed node link packed (Just (identifier, False))
+            Just identifier <$ handOver node link packed (Just (identifier, False))
         | otherwise =
             fmap (Identity.truncatedHash . Packet.hashablePart)
-                <$> sending node session link Packet.Request packed
+                <$> sendSealed node session link Packet.Request packed
       where
         identifier = Identity.truncatedHash packed
 
 announce :: Node -> DestinationHash -> IO ()
 announce node destination = do
     mine <- local <$> tables node
-    mapM_ (\held -> emit node held Packet.None Nothing) (Map.lookup destination mine)
+    mapM_ (\one -> emit node one Packet.None Nothing) (Map.lookup destination mine)
 
-whose :: Node -> Destination.NameHash -> DestinationHash
-whose node hash =
+ownDestination :: Node -> Destination.NameHash -> DestinationHash
+ownDestination node hash =
     Destination.destinationHash hash (Just (Identity.identityHash (public node)))
 
 emit :: Node -> Local -> Packet.Context -> Maybe Interface -> IO ()
-emit node held told toward = do
+emit node mine told toward = do
     random <- randomHash
     case built random of
         Left reason -> hPutStrLn stderr ("announce: " ++ reason)
@@ -606,10 +606,10 @@ emit node held told toward = do
             Nothing -> send node packet
             Just through -> transmit through (Packet.pack packet)
   where
-    hash = nameHash held
-    destination = whose node hash
+    hash = nameHash mine
+    destination = ownDestination node hash
     built random = do
-        body <- Announce.emitted (identity node) destination hash random (appData held)
+        body <- Announce.emitted (identity node) destination hash random (appData mine)
         pure
             Packet
                 { Packet.contextFlag = False
@@ -625,15 +625,15 @@ emit node held told toward = do
 
 -- | A request with no tag reaches no duplicate check, and one already
 -- answered is answered once.
-asked :: Node -> Interface -> Packet -> IO ()
-asked node through packet = case Transport.pathRequest (Packet.payload packet) of
+onPathRequest :: Node -> Interface -> Packet -> IO ()
+onPathRequest node through packet = case Transport.pathRequest (Packet.payload packet) of
     Left _ -> pure ()
     Right wanted
         | not (Transport.accepted wanted) -> pure ()
         | otherwise -> do
             now <- clock
             first <- change node (\was -> let (kept, out) = noted wanted now (requests was) in (was {requests = kept}, out))
-            when first (answer node through wanted)
+            when first (answerPath node through wanted)
   where
     noted wanted now tags = case Transport.uniqueTag wanted of
         Nothing -> (tags, False)
@@ -642,11 +642,11 @@ asked node through packet = case Transport.pathRequest (Packet.payload packet) o
 -- | A destination of this node's own is announced again; one it only
 -- knows a path to is answered with the announce that path was learned
 -- from, and never toward the node the path runs through.
-answer :: Node -> Interface -> Transport.PathRequest -> IO ()
-answer node through wanted = do
+answerPath :: Node -> Interface -> Transport.PathRequest -> IO ()
+answerPath node through wanted = do
     mine <- local <$> tables node
     case Map.lookup destination mine of
-        Just held -> emit node held Packet.PathResponse (Just through)
+        Just one -> emit node one Packet.PathResponse (Just through)
         Nothing -> forwarding node $ do
             kept <- tables node
             now <- clock
@@ -658,11 +658,11 @@ answer node through wanted = do
                 _ -> pure ()
   where
     destination = DestinationHash (Transport.wantedHash wanted)
-    respond now path announcement held =
+    respond now path announcement waiting' =
         Map.insert
             destination
-            (Transport.responding now through path announcement (Map.lookup destination held))
-            held
+            (Transport.responding now through path announcement (Map.lookup destination waiting'))
+            waiting'
 
 requestPath :: Node -> DestinationHash -> IO ()
 requestPath node destination = do

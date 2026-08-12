@@ -15,6 +15,7 @@ module Reticulum.Node.State
     , alter
     , change
     , onSessions
+    , onSession
     , withSessions
     , stop
     , attach
@@ -23,8 +24,8 @@ module Reticulum.Node.State
     , clock
     , forwarding
     , onLink
-    , writing
-    , sending
+    , writeOnLink
+    , sendSealed
     , swapped
     ) where
 
@@ -178,6 +179,9 @@ change node step = atomically $ do
 onSessions :: Node -> (Map ByteString Session -> Map ByteString Session) -> IO ()
 onSessions node step = alter node (\was -> was {sessions = step (sessions was)})
 
+onSession :: Node -> ByteString -> (Session -> Session) -> IO ()
+onSession node link step = onSessions node (Map.adjust step link)
+
 withSessions :: Node -> (Map ByteString Session -> (Map ByteString Session, a)) -> IO a
 withSessions node step =
     change node (\was -> let (now, out) = step (sessions was) in (was {sessions = now}, out))
@@ -216,24 +220,24 @@ onLink link kind told body =
 
 -- | Every packet this end writes on a link is one the far end need not
 -- be woken for.
-writing :: Node -> Session -> Packet -> IO ()
-writing node session packet = do
+writeOnLink :: Node -> Session -> Packet -> IO ()
+writeOnLink node session packet = do
     transmit (at session) (Packet.pack packet)
     now <- clock
-    onSessions node (Map.adjust (wrote now) (Packet.address packet))
+    onSession node (Packet.address packet) (wrote now)
   where
-    wrote now held = held {traffic = (traffic held) {Link.outbound = Path.seconds now}}
+    wrote now session' = session' {traffic = (traffic session') {Link.outbound = Path.seconds now}}
 
 -- | The packet is handed back, because the hash the far end proves is
 -- one only the end that sent it can name.
-sending :: Node -> Session -> ByteString -> Packet.Context -> ByteString -> IO (Maybe Packet)
-sending node session link told plain = do
+sendSealed :: Node -> Session -> ByteString -> Packet.Context -> ByteString -> IO (Maybe Packet)
+sendSealed node session link told plain = do
     vector <- Entropy.getEntropy Token.blockSize
     case Link.sealed (keys session) vector plain of
         Nothing -> Nothing <$ hPutStrLn stderr "link: nothing was sealed"
         Just body -> do
             let packet = onLink link Packet.Data told body
-            writing node session packet
+            writeOnLink node session packet
             pure (Just packet)
 
 swapped :: (a, b) -> (b, a)
