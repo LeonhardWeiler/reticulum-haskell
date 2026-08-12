@@ -66,6 +66,16 @@ executable node
                   , memory
                   , reticulum
 
+executable talk
+    import:         strict
+    hs-source-dirs: cmd/talk
+    main-is:        Main.hs
+    build-depends:  base
+                  , bytestring
+                  , containers
+                  , memory
+                  , reticulum
+
 test-suite test
     import:         strict
     type:           exitcode-stdio-1.0

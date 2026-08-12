@@ -1,13 +1,13 @@
 #!/bin/sh
 #
 # reference/check - this node between two python-rns nodes, a third that
-# talks to the node itself, and a fourth the node talks to.
+# talks to the node itself, and a fourth that talk opens a link to.
 #
 # Neither of the first two can reach the other except through the node
 # built here, the third speaks to a destination the node holds, and the
-# fourth holds one the node opens a link to. Every line printed is one
-# of them saying it got there. Needs python-rns importable and takes
-# about three minutes.
+# fourth holds one the talk command opens a link to. Every line printed
+# is one of them saying it got there. Needs python-rns importable and
+# takes about three minutes.
 #
 # The corpus is what says compatible. This says the node speaks.
 
@@ -34,8 +34,9 @@ python3 -c 'import RNS' 2>/dev/null || {
 	exit 2
 }
 
-cabal build --verbose=0 --project-dir="$root" exe:node >&2
+cabal build --verbose=0 --project-dir="$root" exe:node exe:talk >&2
 node=$(cabal list-bin --verbose=0 --project-dir="$root" exe:node)
+talk=$(cabal list-bin --verbose=0 --project-dir="$root" exe:talk)
 
 instance() {
 	mkdir -p "$work/$1"
@@ -72,13 +73,17 @@ python3 "$root/reference/announce.py" "$work/far" "$announce_after" \
 running="$running $!"
 
 # Both sides are dialled: the far one is up, the near one is not, and
-# the node keeps knocking until it is. The one it opens a link to has
+# the node keeps knocking until it is. The one talk opens a link to has
 # printed what it holds by now.
 sleep 4
 dialled=$(head -1 "$work/hold.out")
-"$node" -t -n haskell.check -d "$dialled" -k "$work/node.key" \
+"$node" -t -n haskell.check -k "$work/node.key" \
 	127.0.0.1:$left 127.0.0.1:$right 127.0.0.1:$third 127.0.0.1:$fourth \
 	> "$work/node.out" 2> "$work/node.err" &
+running="$running $!"
+
+"$talk" "$dialled" 127.0.0.1:$fourth \
+	> "$work/dial.out" 2> "$work/dial.err" &
 running="$running $!"
 
 sleep $((announce_after + 12))
@@ -124,13 +129,13 @@ says talk.out "long response: 4000"
 says node.out "took \"one packet\""
 says node.out "assembled 3000 bytes"
 says node.out "assembled 1049575 bytes"
-says node.out "linked "
-says node.out "packet proved"
-says node.out "answer \"say it back\""
-says node.out "answer \"4000\""
-says node.out "resource proved"
-says node.out "long resource proved"
-says node.out "closed the link"
+says dial.out "linked "
+says dial.out "packet proved"
+says dial.out "answer \"say it back\""
+says dial.out "answer \"4000\""
+says dial.out "resource proved"
+says dial.out "long resource proved"
+says dial.out "closed the link"
 says node.out "link closed"
 says hold.out "link established"
 says hold.out "took b'over the link'"
