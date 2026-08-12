@@ -31,6 +31,7 @@ module Reticulum.Resource
     , handing
     , concluded
     , maxSegmentSize
+    , maxTransferSize
     , autoCompressLimit
     , hashLength
     , mapHashLength
@@ -38,6 +39,7 @@ module Reticulum.Resource
     , proofLength
     ) where
 
+import Control.Monad (guard)
 import Data.Bits (testBit, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
@@ -49,6 +51,7 @@ import Data.Word (Word64, Word8)
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Msgpack as Msgpack
 import Reticulum.Packet (Rejection (FixedLength, ShortPlaintext))
+import qualified Reticulum.Token as Token
 
 hashLength :: Int
 hashLength = 32
@@ -246,6 +249,7 @@ taking size told = do
     entropy' <- randomHash told
     carried <- transferSize told
     flagged' <- flags told
+    guard (carried <= fromIntegral maxTransferSize)
     Just
         Taking
             { resource = hash
@@ -366,6 +370,13 @@ data Segment = Segment
 -- each segment a resource of its own.
 maxSegmentSize :: Int
 maxSegmentSize = 1024 * 1024 - 1
+
+-- | The most one advertisement may ask this end to take in: a whole
+-- segment, the random hash in front of it, and what the token puts
+-- around the two.
+maxTransferSize :: Int
+maxTransferSize =
+    randomHashLength + maxSegmentSize + Token.blockSize + Token.tokenOverhead
 
 -- | Past this much the data is sent as it is, however well it would
 -- have compressed.
