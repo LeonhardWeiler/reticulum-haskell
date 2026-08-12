@@ -45,6 +45,7 @@ import System.IO (hPutStrLn, stderr)
 
 import Reticulum.Announce (Announce)
 import qualified Reticulum.Announce as Announce
+import qualified Reticulum.Bytes as Bytes
 import Reticulum.Destination (DestinationHash (DestinationHash, destinationHashBytes), Name)
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
@@ -530,7 +531,7 @@ metadata held body
     | Resource.prefixed held && Resource.index held == 1 = B.drop (3 + size) body
     | otherwise = body
   where
-    size = B.foldl' (\held' byte -> held' * 256 + fromIntegral byte) 0 (B.take 3 body)
+    size = fromIntegral (Bytes.bigEndian (B.take 3 body))
 
 -- | A resource in segments is one resource, and only the last of them
 -- is answered with what all of them came to; the segment is put away

@@ -21,7 +21,7 @@ import qualified Data.ByteArray as ByteArray
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 
-import Reticulum.Packet (Rejection (ShortPayload))
+import Reticulum.Rejection (Rejection (ShortPayload))
 import Reticulum.Token (Token)
 import qualified Reticulum.Token as Token
 

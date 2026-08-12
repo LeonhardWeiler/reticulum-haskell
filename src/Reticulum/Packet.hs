@@ -14,7 +14,6 @@ module Reticulum.Packet
     , Context (..)
     , toContext
     , contextByte
-    , Rejection (..)
     , encrypted
     , hashablePart
     , packetHash
@@ -29,6 +28,7 @@ import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
 
 import qualified Reticulum.Identity as Identity
+import Reticulum.Rejection (Rejection (HopLimit, ShortHeader))
 
 pathfinderM :: Int
 pathfinderM = 128
@@ -128,23 +128,6 @@ toContext value = case lookup value [(contextByte c, c) | c <- names] of
         , LinkRtt
         , LinkRequestProof
         ]
-
-data Rejection
-    = -- | bytes present, bytes needed
-      ShortHeader Int Int
-    | -- | the count, the threshold
-      HopLimit Int Int
-    | -- | bytes present, bytes needed
-      ShortPayload Int Int
-    | -- | bytes present, the implicit length, the explicit length
-      ProofLength Int Int Int
-    | -- | bytes present, the length without signalling, and with it
-      SignalledLength Int Int Int
-    | -- | bytes needed
-      ShortPlaintext Int
-    | -- | bytes present, the one accepted length
-      FixedLength Int Int
-    deriving (Eq)
 
 -- | The address is a destination hash for every packet but two: a link
 -- request proof carries a link id there and a delivery proof half a

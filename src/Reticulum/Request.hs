@@ -15,7 +15,7 @@ import qualified Data.ByteString as B
 
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Msgpack as Msgpack
-import Reticulum.Packet (Rejection (ShortPlaintext))
+import Reticulum.Rejection (Rejection (ShortPlaintext))
 
 -- | The time is kept as the eight bytes it arrived in, which is what a
 -- reader has to write back to reproduce the packet.

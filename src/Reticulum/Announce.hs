@@ -20,6 +20,7 @@ import Reticulum.Destination (DestinationHash (destinationHashBytes), NameHash (
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Packet as Packet
+import Reticulum.Rejection (Rejection (ShortPayload))
 
 -- | Five random bytes and five of unix time, big endian.
 randomHashLength :: Int
@@ -34,13 +35,13 @@ data Announce = Announce
     , appData :: ByteString
     }
 
-announce :: Packet.Packet -> Either Packet.Rejection Announce
+announce :: Packet.Packet -> Either Rejection Announce
 announce packet
-    | B.length payload < needed = Left (Packet.ShortPayload (B.length payload) needed)
+    | B.length payload < needed = Left (ShortPayload (B.length payload) needed)
     | otherwise = case Identity.publicKey (part 0 Identity.keySize) of
         -- The length above covers this slice, and a short one is the
         -- same rejection.
-        Left _ -> Left (Packet.ShortPayload (B.length payload) needed)
+        Left _ -> Left (ShortPayload (B.length payload) needed)
         Right key ->
             Right
                 Announce

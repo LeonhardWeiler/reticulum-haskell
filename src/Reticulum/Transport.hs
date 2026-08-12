@@ -49,10 +49,11 @@ import Data.Word (Word8)
 import Reticulum.Destination (DestinationHash (DestinationHash, destinationHashBytes), Name)
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Link as Link
-import Reticulum.Packet (Packet, Rejection (ShortPayload), addressLength)
+import Reticulum.Packet (Packet, addressLength)
 import qualified Reticulum.Packet as Packet
 import Reticulum.Path (Time (Time, seconds))
 import qualified Reticulum.Path as Path
+import Reticulum.Rejection (Rejection (ShortPayload))
 
 pathRequestName :: Name
 pathRequestName = Destination.name (C.pack "rnstransport.path.request")

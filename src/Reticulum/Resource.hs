@@ -50,7 +50,7 @@ import Data.Word (Word64, Word8)
 
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Msgpack as Msgpack
-import Reticulum.Packet (Rejection (FixedLength, ShortPlaintext))
+import Reticulum.Rejection (Rejection (FixedLength, ShortPlaintext))
 import qualified Reticulum.Token as Token
 
 hashLength :: Int

@@ -9,11 +9,13 @@ module Reticulum.Msgpack
     , entry
     ) where
 
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits ((.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.Word (Word64, Word8)
 import GHC.Float (castDoubleToWord64)
+
+import qualified Reticulum.Bytes as Bytes
 
 data Value
     = Nil
@@ -52,10 +54,10 @@ pack (Map keyed) =
 
 -- | Eight bytes wide, never the four a smaller number would fit in.
 double :: Double -> Value
-double = Float . bigEndianOf 8 . castDoubleToWord64
+double = Float . Bytes.bigEndianOf 8 . castDoubleToWord64
 
 marked :: Word8 -> Int -> Word64 -> ByteString
-marked marker width count = B.singleton marker <> bigEndianOf width count
+marked marker width count = B.singleton marker <> Bytes.bigEndianOf width count
 
 prefixed :: Word8 -> Word8 -> Word8 -> ByteString -> ByteString
 prefixed one two four bytes
@@ -70,10 +72,6 @@ counting fixed two four count
     | count < 0x10 = B.singleton (fixed .|. fromIntegral count)
     | count <= 0xffff = marked two 2 (fromIntegral count)
     | otherwise = marked four 4 (fromIntegral count)
-
-bigEndianOf :: Int -> Word64 -> ByteString
-bigEndianOf width count =
-    B.pack [fromIntegral (count `shiftR` (8 * place)) | place <- [width - 1, width - 2 .. 0]]
 
 element :: Int -> Value -> Maybe Value
 element index (Array values) = case drop index values of
@@ -136,9 +134,7 @@ lengthy width held bytes = do
 bigEndian :: Int -> ByteString -> Maybe (Word64, ByteString)
 bigEndian width bytes
     | B.length bytes < width = Nothing
-    | otherwise = Just (read', B.drop width bytes)
-  where
-    read' = B.foldl' (\held byte -> (held `shiftL` 8) .|. fromIntegral byte) 0 (B.take width bytes)
+    | otherwise = Just (Bytes.bigEndian (B.take width bytes), B.drop width bytes)
 
 -- | A body that announces more than it holds yields what it held, and
 -- the reader stops reading rather than stopping.

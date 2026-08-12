@@ -43,9 +43,10 @@ import qualified Data.ByteString as B
 import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
 
+import qualified Reticulum.Bytes as Bytes
 import qualified Reticulum.Encryption as Encryption
 import qualified Reticulum.Identity as Identity
-import Reticulum.Packet (Rejection (SignalledLength))
+import Reticulum.Rejection (Rejection (SignalledLength))
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Token as Token
 
@@ -229,7 +230,7 @@ mode signalled = case B.uncons =<< signalled of
     Nothing -> modeAes256Cbc
 
 mtu :: Maybe ByteString -> Maybe Int
-mtu = fmap ((.&. mtuBytemask) . bigEndian)
+mtu = fmap ((.&. mtuBytemask) . fromIntegral . Bytes.bigEndian)
 
 -- | The three bits the mode is read from are the top of the same three
 -- bytes the unit is written in.
@@ -264,9 +265,6 @@ partSize unit = unit - accessCodeSize - Packet.headerLength Packet.Header2
 
 accessCodeSize :: Int
 accessCodeSize = 1
-
-bigEndian :: ByteString -> Int
-bigEndian = B.foldl' (\value byte -> (value `shiftL` 8) .|. fromIntegral byte) 0
 
 -- | The signalling bytes are cut off the end, so a request that signals
 -- an MTU opens the link a request without one opens.

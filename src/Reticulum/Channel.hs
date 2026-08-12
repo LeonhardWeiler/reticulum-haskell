@@ -6,13 +6,13 @@ module Reticulum.Channel
     , envelopeSize
     ) where
 
-import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.Word (Word16)
 import Prelude hiding (sequence)
 
-import Reticulum.Packet (Rejection (ShortPlaintext))
+import Reticulum.Bytes (bigEndian)
+import Reticulum.Rejection (Rejection (ShortPlaintext))
 
 envelopeSize :: Int
 envelopeSize = 6
@@ -38,5 +38,4 @@ envelope plain
                 , message = B.drop envelopeSize plain
                 }
   where
-    word16 at =
-        B.foldl' (\value byte -> (value `shiftL` 8) .|. fromIntegral byte) 0 (B.take 2 (B.drop at plain))
+    word16 at = fromIntegral (bigEndian (B.take 2 (B.drop at plain)))

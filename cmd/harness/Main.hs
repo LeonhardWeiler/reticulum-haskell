@@ -1,6 +1,5 @@
 module Main (main) where
 
-import Data.Bits (shiftR)
 import qualified Data.ByteArray.Encoding as Encoding
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
@@ -10,6 +9,7 @@ import System.Environment (getArgs, getProgName)
 import System.Exit (ExitCode (ExitFailure), die, exitWith)
 
 import qualified Reticulum.Announce as Announce
+import qualified Reticulum.Bytes as Bytes
 import qualified Reticulum.Channel as Channel
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
@@ -18,6 +18,7 @@ import qualified Reticulum.Interface as Interface
 import qualified Reticulum.Link as Link
 import qualified Reticulum.Packet as Packet
 import qualified Reticulum.Proof as Proof
+import qualified Reticulum.Rejection as Rejection
 import qualified Reticulum.Request as Request
 import qualified Reticulum.Resource as Resource
 import qualified Reticulum.Token as Token
@@ -299,7 +300,7 @@ linkdata requestRaw responderKey raw =
 
     contents unpacked = either rejection id . decompose (fst <$> opening) (Packet.context unpacked)
 
-decompose :: Maybe ByteString -> Packet.Context -> ByteString -> Either Packet.Rejection [Field]
+decompose :: Maybe ByteString -> Packet.Context -> ByteString -> Either Rejection.Rejection [Field]
 decompose link named bytes = case named of
     Packet.LinkIdentify -> Right (identify link bytes)
     Packet.Channel -> channel <$> Channel.envelope bytes
@@ -380,7 +381,7 @@ ifac netname netkey rawSize raw =
     , ("ifac_valid", maybe Absent verdict ((==) <$> (Interface.code <$> framed) <*> expected))
     ]
   where
-    size = B.foldl' (\value read' -> value * 256 + fromIntegral read') 0 rawSize
+    size = fromIntegral (Bytes.bigEndian rawSize)
     held = Interface.access netname netkey
     framed = (\value -> Interface.frame value size raw) =<< held
     expected = do
@@ -478,7 +479,7 @@ plaintext :: Maybe ByteString -> [Field]
 plaintext Nothing = [("plaintext_length", Absent), ("plaintext", Absent)]
 plaintext (Just bytes) = [("plaintext_length", Dec (B.length bytes)), ("plaintext", Hex bytes)]
 
-packet :: ByteString -> (Packet.Packet -> Either Packet.Rejection [Field]) -> [Field]
+packet :: ByteString -> (Packet.Packet -> Either Rejection.Rejection [Field]) -> [Field]
 packet raw fields = case Packet.unpack raw of
     Left reason -> rejection reason
     Right unpacked -> case fields unpacked of
@@ -565,39 +566,39 @@ context named = case spelled contexts named of
     Absent -> byte (Packet.contextByte named)
     word -> word
 
-rejection :: Packet.Rejection -> [Field]
+rejection :: Rejection.Rejection -> [Field]
 rejection broken = case broken of
-    Packet.ShortHeader present needed ->
+    Rejection.ShortHeader present needed ->
         [ ("invalid", Keyword "short-header")
         , ("length", Dec present)
         , ("minimum_length", Dec needed)
         ]
-    Packet.HopLimit count limit ->
+    Rejection.HopLimit count limit ->
         [ ("invalid", Keyword "hop-limit")
         , ("hops", Dec count)
         , ("hop_limit", Dec limit)
         ]
-    Packet.ShortPayload present needed ->
+    Rejection.ShortPayload present needed ->
         [ ("invalid", Keyword "short-payload")
         , ("payload_length", Dec present)
         , ("minimum_length", Dec needed)
         ]
-    Packet.SignalledLength present accepted withSignalling ->
+    Rejection.SignalledLength present accepted withSignalling ->
         [ ("invalid", Keyword "invalid-length")
         , ("payload_length", Dec present)
         , ("accepted_length", Dec accepted)
         , ("signalled_length", Dec withSignalling)
         ]
-    Packet.ShortPlaintext needed ->
+    Rejection.ShortPlaintext needed ->
         [ ("invalid", Keyword "short-plaintext")
         , ("minimum_length", Dec needed)
         ]
-    Packet.FixedLength present accepted ->
+    Rejection.FixedLength present accepted ->
         [ ("invalid", Keyword "invalid-length")
         , ("payload_length", Dec present)
         , ("accepted_length", Dec accepted)
         ]
-    Packet.ProofLength present implicit explicit ->
+    Rejection.ProofLength present implicit explicit ->
         [ ("invalid", Keyword "invalid-length")
         , ("payload_length", Dec present)
         , ("implicit_length", Dec implicit)
@@ -637,7 +638,7 @@ byte :: Word8 -> Value
 byte = Hex . B.singleton
 
 word16 :: Word16 -> Value
-word16 value = Hex (B.pack [fromIntegral (value `shiftR` 8), fromIntegral value])
+word16 value = Hex (Bytes.bigEndianOf 2 (fromIntegral value))
 
 verdict :: Bool -> Value
 verdict held = Keyword (if held then "yes" else "no")

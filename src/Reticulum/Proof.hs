@@ -16,7 +16,8 @@ import qualified Data.ByteString as B
 import Data.Maybe (fromMaybe)
 
 import qualified Reticulum.Identity as Identity
-import Reticulum.Packet (Rejection (ProofLength), addressLength)
+import Reticulum.Packet (addressLength)
+import Reticulum.Rejection (Rejection (ProofLength))
 
 implicitLength :: Int
 implicitLength = Identity.signatureLength

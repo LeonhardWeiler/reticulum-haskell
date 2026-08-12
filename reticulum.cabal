@@ -16,6 +16,7 @@ library
     import:          strict
     hs-source-dirs:  src
     exposed-modules: Reticulum.Announce
+                     Reticulum.Bytes
                      Reticulum.Channel
                      Reticulum.Destination
                      Reticulum.Encryption
@@ -29,6 +30,7 @@ library
                      Reticulum.Packet
                      Reticulum.Path
                      Reticulum.Proof
+                     Reticulum.Rejection
                      Reticulum.Request
                      Reticulum.Resource
                      Reticulum.Token
