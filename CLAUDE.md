@@ -103,12 +103,17 @@ Failure:
     the rule broken and the numbers behind it.
     No head, no fromJust, no incomplete pattern.
     -Wall -Werror -Wincomplete-uni-patterns.
-    Bound every read by the bytes present.
+    Bound every read by the bytes present, and every table by what it
+    is allowed to hold. What a stranger announces has a limit. What
+    grows from the network has a way of shrinking, and the sweeper is
+    where that is written.
 
 Threads:
 
-    forkIO and STM. One thread per interface. Every thread owns
-    something and can be stopped.
+    forkIO and STM. A node's tables are one value behind one TVar, so
+    what reads two of them reads one moment and what changes two of
+    them changes them together. One thread per interface. Every thread
+    owns something and can be stopped.
 
 ---
 
@@ -118,6 +123,16 @@ A module is named for what it holds, and the name is the whole
 explanation:
 
     Reticulum.Packet    the header and the flags byte
+
+A function with an effect is named for the effect: dispatch, admit,
+takePart. A participle names a value; an action named like one has to
+be read to be known.
+
+A name is as long as its scope. One short word in a page-long function
+ends up standing for four different types.
+
+An enumeration is written once. The byte a context is, the word a
+field is spelled with: one table, and both directions read it.
 
 The reference and the corpus are not cited in the code. Not by symbol,
 not by path, not in a module header. Where they are named is this file,
@@ -140,6 +155,10 @@ values. No component reads configuration.
 A behaviour known to disagree with the reference is fixed, or the code
 is deleted. It is not written down and left standing. Until it is
 fixed, the vector fails and the count is the record.
+
+Code nothing calls is deleted, and a branch nothing can reach is worse
+than dead: it reads as a rule that holds. If the rule is wanted,
+something has to call it.
 
 ---
 
@@ -167,6 +186,8 @@ One library, and the executables a node needs.
     Does base already do it?
     Can a function replace a class?
     Can a value replace a knob?
+    Is this list already written down somewhere else?
+    Can it grow without bound, and what makes it shrink?
     Does a running node need it, or only a reader of the code?
 
 If the first answer is yes, stop.
@@ -178,13 +199,13 @@ If the first answer is yes, stop.
 Short sentences. Concrete byte offsets. This file, a README and a
 comment are one discipline: say the thing, then stop.
 
-A comment is an exception. The default is none, and most files have
-none. One is written only where a reader who has the code in front of
-them still cannot arrive at the fact: a rule that is not visible in the
-bytes, an order that looks arbitrary and is not.
+A comment holds a rule that is in no byte: a length that is not where
+it looks, an order that looks arbitrary and is not, a byte the far end
+reads and this one writes without reading. Nothing else is a comment,
+and most functions need none.
 
-One sentence. Never two. A comment that needs a second sentence is a
-name that needs changing.
+One sentence, one fact. A sentence joined by "and" is two comments,
+and one of the two is usually the code restated.
 
 Not a citation. Not why one choice was made over another. Not the name
 above it, restated. Not a header on every function, and not a header on
@@ -223,3 +244,5 @@ reaches:
     the channel            the envelope, and nothing over it
     the interface          one socket, and every other kind of link
                            between two nodes
+    the access code        the codec the corpus proves, and no node
+                           that speaks it
