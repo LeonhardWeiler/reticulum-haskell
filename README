@@ -12,8 +12,7 @@ Where it stands
 
     104 passed, 0 failed, corpus 72746484
 
-Every kind the corpus holds, and the round trip behind the 88 vectors
-whose expect holds every byte of raw.
+Every kind the corpus holds, in both directions.
 
 
 Build
@@ -25,7 +24,7 @@ Nix is the only thing that has to be installed.
     ./check
 
 The shell carries the compiler, cabal, and the C compiler and POSIX
-tools the corpus builds itself with. Flake.nix names the compiler and
+tools the corpus builds itself with. flake.nix names the compiler and
 flake.lock pins the package set.
 
 
@@ -34,13 +33,10 @@ check
     ./check                                 clone the pin and measure
     CORPUS_DIR=../reticulum-vectors ./check use that checkout as it is
 
-CORPUS holds two lines and is the only place they are written:
-
-    commit        the corpus commit to measure against
-    fingerprint   the corpus number printed on the result line
-
-A count is a count against one corpus. The fingerprint says which one,
-so check refuses a result that carries another.
+CORPUS holds two lines and is the only place they are written: the
+corpus commit to measure against, and the number printed on its result
+line. A count is a count against one corpus, so check refuses a result
+that carries another.
 
     exit 0    every vector that was not skipped passed
     exit 1    a vector failed
@@ -48,11 +44,55 @@ so check refuses a result that carries another.
               on file
 
 
+Using it
+
+A node that dials one peer, holds a destination, announces it, and
+answers one request path:
+
+    main :: IO ()
+    main = do
+        private <- Node.keypair
+        started <- Node.start Node.Settings {Node.transport = False} private (\_ _ _ -> pure ())
+        case started of
+            Left reason -> putStrLn reason
+            Right node -> do
+                holder <- newEmptyMVar
+                tcp <- Tcp.start (Tcp.Peer "127.0.0.1" "4242") $ \raw -> do
+                    through <- readMVar holder
+                    Node.inbound node through raw
+                through <- Node.interface "peer" (Tcp.transmit tcp)
+                putMVar holder through
+                Node.attach node through
+                held <- Node.serve node (Destination.name (C.pack "example.echo")) B.empty answers
+                Node.announce node held
+      where
+        answers =
+            Node.silent
+                { Node.delivered = print
+                , Node.requested = Map.singleton (Request.named (C.pack "echo")) (pure . Just)
+                }
+
+Node.silent hears everything and says nothing, so a caller writes down
+only what it answers. A packet is filed under the interface it arrived
+on, which is why the reader waits on an MVar for the interface it is
+reading for: the socket exists before the interface does.
+
+The other end of that is Node.open, which gives back a link to speak
+on: Node.speak sends a packet, Node.ask sends a request, Node.hand
+hands over a resource of any length, and Node.close ends it. cmd/talk
+is that side, whole, in a hundred lines.
+
+The node speaks no interface access codes: a frame that carries one is
+dropped. Reticulum.Interface holds the codec for them, and the corpus
+is what exercises it.
+
+
 Layout
 
     src/Reticulum/     the library: the codec is pure, the node is IO
     cmd/harness/       the corpus harness, linked to ./harness by check
     cmd/node/          a node on TCP interfaces, dialled and answered
+    cmd/talk/          opens a link to a destination and speaks on it
     test/              what the corpus cannot hold
     reference/         this node with python-rns nodes around it
     .github/workflows/ one job, and it runs ./check
@@ -69,74 +109,28 @@ One program taking the arguments the corpus's cmd/dump takes:
     ./harness <kind> <rawfile>       fields out
     ./harness -e <kind> <expectfile> raw back
 
-It prints one field per line from this implementation's own code. A
-field this implementation does not compute is a dash; the harness
-never computes one on the library's behalf. A kind not implemented
-exits 77. The contract is the corpus's doc/harness.
-
-Going the other way, the fields are read back into the library's own
-types and the library writes the bytes. The keys never enter into it:
-a token whose hmac was altered is still a token, which is why such a
-vector can be rebuilt at all.
+It prints one field per line from this implementation's own code, and
+reads those fields back into the library's types to write the bytes
+again. The contract is the corpus's doc/harness; the three rules it
+binds this repository to are in CLAUDE.md.
 
 
-The node
+The commands
 
-    node [-t] [-l <port>] [-n <name>] [-d <hex>] [-k <file>]
-         [<host>:<port> ...]
+    node [-t] [-l <port>] [-n <name>] [-k <file>] [<host>:<port> ...]
 
     -t          be a transport node
     -l <port>   listen, and take every connection as an interface
     -n <name>   hold this destination, and announce it once
-    -d <hex>    open a link to this destination and speak on it
     -k <file>   the identity, written if the file is not there
 
-Dials every peer given and answers on the port given, and prints a line
-for every announce it takes into its path table: the destination, the
-hops it is away, the interface it came on, and the app data. It needs
-at least one of the two, a peer or a port. Log lines go to standard
-error.
+    talk <hex> <host>:<port> ...
 
-With -t the node is a transport node: it carries announces onward, a
-packet naming it as the next hop goes on toward the destination its
-path table knows, and a path request it can answer is answered from
-the announce it kept. A proof for a packet it passed on goes back the
-way that packet came, and a link opened across it keeps running.
-Without -t the node listens, answers path requests for its own
-destination, and forwards nothing.
+Dials every peer given, opens a link to that destination, sends a
+packet, asks two requests, hands over two resources -- one of them
+longer than a segment -- and closes the link. Every step prints a line.
 
-The path table is what an announce leaves behind. A shorter path is
-taken only when it was emitted later than the one on file, and an
-announce the table keeps nothing of is one nothing above it hears
-about.
-
-A resource longer than a megabyte goes over a segment at a time. Each
-segment is advertised, handed over and proved on its own, the next one
-follows the proof of the one before it, and the far end puts them back
-together under the hash the first went out with.
-
-A destination the node holds is a destination it answers for. A packet
-addressed to it is opened and proved. A link request is answered, and
-on the link that opens, a packet is taken and proved, a keepalive is
-answered, an identify is remembered, and a close ends it. A resource is
-taken part by part, checked against the hash it was advertised under
-and proved. Two request paths are served: echo answers with what it was
-asked, and length with how many bytes that was, which is the answer a
-request too long for one packet gets.
-
-With -d the node is the end that opens. It asks for the path until it
-has one, opens a link to that destination, and on it sends a packet and
-waits for the proof, asks echo and takes the answer, asks length with
-more than one packet holds so the request goes as a resource, and hands
-a resource over and waits for the proof of it, and then closes the
-link. Every one of those prints a line.
-
-A link is kept while it is used. The end that opened one writes a
-keepalive when nothing has crossed it either way for six minutes, and
-the other end answers. Either end writes a close, and the end that
-takes one keeps nothing of the link. A link nothing has come in on for
-twelve minutes is closed the same way, and so is one whose interface is
-gone.
+Both need at least one peer. Log lines go to standard error.
 
 
 Tests
@@ -144,35 +138,16 @@ Tests
     cabal test
 
 There are none here that a vector already proves. What belongs here is
-what the corpus cannot hold: properties, and the layers above link.
-Today that is the transport node and what either end of a link does:
-the rules the tables follow, the token in the direction that encrypts,
-and nodes wired to each other in memory, one carrying what another
-announced, opening a link across it, proving what crossed, answering a
-link, a request and a resource of its own, and opening a link of its
-own to send a request, hand a resource over, hand over one longer than
-a segment, and close the link from either end.
+what the corpus cannot hold: properties, and the layers above link --
+the transport node, both ends of a link, and the tables behind them.
 
     ./reference/check
 
 is the same node between two python-rns nodes that cannot reach each
 other any other way, a third that talks to the node itself, and a
-fourth the node talks to. It needs python-rns importable, takes about
-three minutes, and is not run in CI. Thirty-one lines are checked.
-Through the node: it hears the announce, the far side has no path and
-then has one two hops away, a packet across it is proved, a link opens,
-and what is said over that link arrives. To the node: a path it answers
-for itself, a packet it proves, a link it answers, a packet on that
-link it proves, a request it serves, a request too long for one packet
-that arrives as a resource and is answered from it, an answer as long
-as what was asked that goes back as one, a resource it takes whole, one
-past a segment that it takes as two and answers as one, and the close
-that ends the link, which it takes as the end of it. From the node: a
-link it opens, a packet on it that is proved, an answer to a request it
-sent, a request of its own too long for one packet, a resource it hands
-over and sees proved, one past a segment that goes over as two, and the
-close it writes when there is nothing left to say, which the far side
-takes as the end.
+fourth that talk opens a link to. It needs python-rns importable, takes
+about three minutes, and is not run in CI. Thirty-one lines are
+checked, and every one of them is a node saying what it got.
 
 
 License
