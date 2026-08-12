@@ -5,6 +5,7 @@ module Reticulum.Node.State
     , interface
     , Settings (..)
     , Answering (..)
+    , silent
     , Local (..)
     , Session (..)
     , Opening (..)
@@ -88,6 +89,19 @@ data Answering = Answering
     , answered :: ByteString -> ByteString -> IO ()
     , closed :: IO ()
     }
+
+-- | Hears everything and says nothing, so a caller writes down only
+-- what it answers.
+silent :: Answering
+silent =
+    Answering
+        { delivered = const (pure ())
+        , assembled = const (pure ())
+        , requested = Map.empty
+        , proved = const (pure ())
+        , answered = \_ _ -> pure ()
+        , closed = pure ()
+        }
 
 data Local = Local
     { nameHash :: Destination.NameHash

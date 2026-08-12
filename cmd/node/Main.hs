@@ -119,7 +119,7 @@ announcing node name = do
     Node.announce node destination
   where
     served =
-        Node.Answering
+        Node.silent
             { Node.delivered = \plain -> putStrLn (unwords ["took", show plain])
             , Node.assembled = \plain -> putStrLn (unwords ["assembled", show (B.length plain), "bytes"])
             , Node.requested =
@@ -127,8 +127,6 @@ announcing node name = do
                     [ (Request.named (C.pack "echo"), pure . Just)
                     , (Request.named (C.pack "length"), pure . Just . counted)
                     ]
-            , Node.proved = const (pure ())
-            , Node.answered = \_ _ -> pure ()
             , Node.closed = putStrLn "link closed"
             }
     counted plain = C.pack (show (B.length plain))
@@ -187,10 +185,9 @@ asked node destination = do
 
 hears :: IORef (Map.Map ByteString String) -> IORef [ByteString] -> Node.Answering
 hears named shown =
-    Node.Answering
+    Node.silent
         { Node.delivered = \plain -> putStrLn (unwords ["took", show plain])
         , Node.assembled = \plain -> putStrLn (unwords ["assembled", show (B.length plain), "bytes"])
-        , Node.requested = Map.empty
         , Node.proved = \hash -> do
             atomicModifyIORef' shown (\kept -> (hash : kept, ()))
             labels <- readIORef named

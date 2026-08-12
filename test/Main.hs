@@ -433,7 +433,7 @@ carried :: ByteString
 carried = C.pack "test.carried"
 
 emitting :: Node.Node -> IO ()
-emitting node = holding node quiet
+emitting node = holding node Node.silent
 
 holding :: Node.Node -> Node.Answering -> IO ()
 holding node hears =
@@ -446,16 +446,6 @@ gathered :: IORef [a] -> IO [a]
 gathered kept = fromMaybe [] <$> waitFor (some <$> readIORef kept)
   where
     some values = if null values then Nothing else Just values
-
-quiet :: Node.Answering
-quiet =
-    Node.Answering
-        (const (pure ()))
-        (const (pure ()))
-        Map.empty
-        (const (pure ()))
-        (\_ _ -> pure ())
-        (pure ())
 
 waitFor :: IO (Maybe a) -> IO (Maybe a)
 waitFor look = go (60 :: Int)
@@ -548,7 +538,7 @@ sealedTo salt key plain =
 serving :: Node.Node -> IO (IO [ByteString])
 serving node = do
     took <- newIORef []
-    _ <- Node.serve node (Destination.name carried) B.empty quiet {Node.delivered = keeping took}
+    _ <- Node.serve node (Destination.name carried) B.empty Node.silent {Node.delivered = keeping took}
     pure (readIORef took)
 
 takenAndProved :: IO (Either String ())
@@ -658,7 +648,7 @@ linked answering = do
 linkAnswered :: IO (Either String ())
 linkAnswered = do
     took <- newIORef []
-    begun <- linked quiet {Node.delivered = keeping took}
+    begun <- linked Node.silent {Node.delivered = keeping took}
     case begun of
         Left reason -> pure (Left reason)
         Right open -> case Link.sealed (openedKeys open) vector overTheLink of
@@ -694,7 +684,7 @@ linkAnswered = do
 linkOpened :: IO (Either String ())
 linkOpened = do
     took <- newIORef []
-    (near, emitter) <- twoNodes quiet {Node.delivered = keeping took}
+    (near, emitter) <- twoNodes Node.silent {Node.delivered = keeping took}
     found <- waitFor (reached near emitter)
     case found of
         Nothing -> pure (Left "the announce did not arrive")
@@ -704,7 +694,7 @@ linkOpened = do
                 Node.open
                     near
                     (Destination.DestinationHash (addressOf emitter))
-                    quiet {Node.proved = keeping proofs}
+                    Node.silent {Node.proved = keeping proofs}
             case opened of
                 Left reason -> pure (Left reason)
                 Right link -> do
@@ -724,7 +714,7 @@ linkClosed byOpener = do
     (near, _, _) <- started False
     (far, _, emitter) <- started False
     wire "one" near far
-    holding far quiet {Node.closed = keeping ends ()}
+    holding far Node.silent {Node.closed = keeping ends ()}
     found <- waitFor (reached near emitter)
     case found of
         Nothing -> pure (Left "the announce did not arrive")
@@ -734,7 +724,7 @@ linkClosed byOpener = do
                 Node.open
                     near
                     (Destination.DestinationHash (addressOf emitter))
-                    quiet {Node.closed = keeping here ()}
+                    Node.silent {Node.closed = keeping here ()}
             case opened of
                 Left reason -> pure (Left reason)
                 Right link -> do
@@ -757,8 +747,8 @@ whenWoken = do
         not (Link.waking later (Link.crossed now) {Link.woken = later - 1})
     require "what only went out is counted as something coming in" $
         Link.waking later (Link.crossed now) {Link.outbound = later}
-    require "one interval of quiet is stale" (not (Link.stale later (Link.crossed now)))
-    require "two intervals of quiet are not" $
+    require "one interval of Node.silent is stale" (not (Link.stale later (Link.crossed now)))
+    require "two intervals of Node.silent are not" $
         Link.stale (later + Link.keepaliveInterval) (Link.crossed now)
   where
     now = 1000
@@ -769,7 +759,7 @@ whenWoken = do
 -- asked.
 requestSent :: Int -> IO (Either String ())
 requestSent size = do
-    (near, emitter) <- twoNodes quiet {Node.requested = Map.singleton path (pure . Just . B.reverse)}
+    (near, emitter) <- twoNodes Node.silent {Node.requested = Map.singleton path (pure . Just . B.reverse)}
     found <- waitFor (reached near emitter)
     case found of
         Nothing -> pure (Left "the announce did not arrive")
@@ -779,7 +769,7 @@ requestSent size = do
                 Node.open
                     near
                     (Destination.DestinationHash (addressOf emitter))
-                    quiet {Node.answered = \named given -> keeping answers (named, given)}
+                    Node.silent {Node.answered = \named given -> keeping answers (named, given)}
             case opened of
                 Left reason -> pure (Left reason)
                 Right link -> do
@@ -801,7 +791,7 @@ requestSent size = do
 resourceGiven :: Int -> IO (Either String ())
 resourceGiven size = do
     took <- newIORef []
-    (near, emitter) <- twoNodes quiet {Node.assembled = keeping took}
+    (near, emitter) <- twoNodes Node.silent {Node.assembled = keeping took}
     found <- waitFor (reached near emitter)
     case found of
         Nothing -> pure (Left "the announce did not arrive")
@@ -811,7 +801,7 @@ resourceGiven size = do
                 Node.open
                     near
                     (Destination.DestinationHash (addressOf emitter))
-                    quiet {Node.proved = keeping proofs}
+                    Node.silent {Node.proved = keeping proofs}
             case opened of
                 Left reason -> pure (Left reason)
                 Right link -> do
@@ -860,7 +850,7 @@ asked path body =
 
 requestAnswered :: IO (Either String ())
 requestAnswered = do
-    begun <- linked quiet {Node.requested = Map.singleton (Request.named echo) (pure . Just . B.reverse)}
+    begun <- linked Node.silent {Node.requested = Map.singleton (Request.named echo) (pure . Just . B.reverse)}
     case begun of
         Left reason -> pure (Left reason)
         Right open -> do
@@ -936,7 +926,7 @@ nth reader wanted place = waitFor (found <$> reader)
 resourceTaken :: Bool -> IO (Either String ())
 resourceTaken compress = do
     took <- newIORef []
-    begun <- linked quiet {Node.assembled = keeping took}
+    begun <- linked Node.silent {Node.assembled = keeping took}
     case begun of
         Left reason -> pure (Left reason)
         Right open -> case Link.sealed (openedKeys open) vector (prefix <> inside) of

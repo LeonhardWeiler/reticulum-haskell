@@ -5,6 +5,7 @@ module Reticulum.Node
     , interface
     , Settings (..)
     , Answering (..)
+    , silent
     , Node
     , start
     , stop
