@@ -30,52 +30,92 @@ main = do
     case args of
         [kind, path] -> do
             blobs <- readBlobs path
-            case dump kind blobs of
-                -- 77 says the kind is not implemented, and nothing else
-                -- may use it.
-                Nothing -> exitWith (ExitFailure 77)
-                Just (Left reason) -> die (path ++ ": " ++ reason)
-                Just (Right fields) -> mapM_ (putStrLn . render) fields
+            -- 77 says the kind is not implemented, and nothing else may
+            -- use it.
+            held <- maybe (exitWith (ExitFailure 77)) pure (lookup kind kinds)
+            case dumped held blobs of
+                Left reason -> die (path ++ ": " ++ reason)
+                Right fields -> mapM_ (putStrLn . render) fields
         ["-e", kind, path] -> do
             fields <- readFields path
-            case encode kind fields of
-                Nothing -> exitWith (ExitFailure 77)
-                Just (Left reason) -> die (path ++ ": " ++ reason)
-                Just (Right raw) -> mapM_ putStrLn raw
+            held <- maybe (exitWith (ExitFailure 77)) pure (lookup kind kinds)
+            case encoded held fields of
+                Left reason -> die (path ++ ": " ++ reason)
+                Right raw -> mapM_ putStrLn raw
         _ -> do
             name <- getProgName
             die ("usage: " ++ name ++ " <kind> <rawfile>\n       " ++ name ++ " -e <kind> <expectfile>")
 
--- | Nothing for a kind this harness has not implemented, Left for a raw
--- that does not carry what the kind holds.
-dump :: String -> [Maybe ByteString] -> Maybe (Either String [Field])
-dump kind blobs = case kind of
-    "identity" -> Just (identity <$> blob 0 "public key")
-    "keyset" -> Just (keyset <$> blob 0 "private key")
-    "destination" -> Just (destination <$> blob 0 "name" <*> pure (blobs `at` 1))
-    "announce" -> Just (announce <$> blob 0 "packet")
-    "plain" -> Just (plain <$> blob 0 "packet")
-    "pathrequest" -> Just (pathrequest <$> blob 0 "packet")
-    "group" -> Just (group <$> blob 0 "group key" <*> blob 1 "packet")
-    "encrypted" ->
-        Just (encrypted <$> blob 0 "recipient private key" <*> pure (blobs `at` 1) <*> blob 2 "packet")
-    "proof" -> Just (proof <$> blob 0 "proved packet" <*> blob 1 "public key" <*> blob 2 "packet")
-    "linkrequest" -> Just (linkrequest <$> blob 0 "packet")
-    "linkproof" -> Just (linkproof <$> blob 0 "link request" <*> blob 1 "public key" <*> blob 2 "packet")
-    "linkdata" ->
-        Just (linkdata <$> blob 0 "link request" <*> blob 1 "responder private key" <*> blob 2 "packet")
-    "resourceproof" -> Just (resourceproof <$> blob 0 "resource hash" <*> blob 1 "packet")
-    "ifac" ->
-        Just
-            ( ifac (blobs `at` 0) (blobs `at` 1)
-                <$> blob 2 "access code size"
-                <*> blob 3 "frame"
-            )
-    "signature" -> Just (signature <$> blob 0 "public key" <*> blob 1 "message" <*> blob 2 "signature")
-    "sign" -> Just (signed <$> blob 0 "private key" <*> blob 1 "message")
-    _ -> Nothing
+-- | What a kind of vector is: the fields read out of its raw, and the
+-- raw written back from its expect. A kind is named once and both
+-- directions stand beside each other.
+data Kind = Kind
+    { dumped :: [Maybe ByteString] -> Either String [Field]
+    , encoded :: Fields -> Either String [String]
+    }
+
+kinds :: [(String, Kind)]
+kinds =
+    [ ("identity", Kind (one identity "public key") (echoed ["public_key"]))
+    , ("keyset", Kind (one keyset "private key") (echoed ["private_key"]))
+    , ("destination", Kind named (echoed ["name", "identity_hash"]))
+    , ("announce", Kind (one announce "packet") (writing [] announced))
+    , ("plain", Kind (one plain "packet") (writing [] (`part` "plaintext")))
+    , ("pathrequest", Kind (one pathrequest "packet") (writing [] asking))
+    , ("group", Kind (two group "group key" "packet") (writing ["group_key"] sealing))
+    , ("encrypted", Kind sealedFor (writing ["recipient_private", "ratchet_private"] enveloped))
+    , ("proof", Kind (three proof "proved packet" "public key" "packet") (writing proofRaw proven))
+    , ("linkrequest", Kind (one linkrequest "packet") (writing [] requesting))
+    , ("linkproof", Kind (three linkproof "link request" "public key" "packet") (writing linkRaw proving))
+    , ("linkdata", Kind (three linkdata "link request" "responder private key" "packet") (writing dataRaw onLink))
+    , ("resourceproof", Kind (two resourceproof "resource hash" "packet") (writing ["advertised_hash"] delivered))
+    , ("ifac", Kind masked masking)
+    , ("signature", Kind (three signature "public key" "message" "signature") (const unrecorded))
+    , ("sign", Kind (two signed "private key" "message") (const unrecorded))
+    ]
   where
-    blob index what = maybe (Left ("raw carries no " ++ what)) Right (blobs `at` index)
+    proofRaw = ["proved_packet", "signer_public"]
+    linkRaw = ["link_request", "signer_public"]
+    dataRaw = ["link_request", "responder_private"]
+    sealing fields = Token.pack <$> sealed fields
+    named raw = destination <$> blob raw 0 "name" <*> pure (raw `at` 1)
+    sealedFor raw =
+        encrypted <$> blob raw 0 "recipient private key" <*> pure (raw `at` 1) <*> blob raw 2 "packet"
+    masked raw =
+        ifac (raw `at` 0) (raw `at` 1) <$> blob raw 2 "access code size" <*> blob raw 3 "frame"
+
+one :: (ByteString -> [Field]) -> String -> [Maybe ByteString] -> Either String [Field]
+one fields what raw = fields <$> blob raw 0 what
+
+two
+    :: (ByteString -> ByteString -> [Field])
+    -> String
+    -> String
+    -> [Maybe ByteString]
+    -> Either String [Field]
+two fields first second raw = fields <$> blob raw 0 first <*> blob raw 1 second
+
+three
+    :: (ByteString -> ByteString -> ByteString -> [Field])
+    -> String
+    -> String
+    -> String
+    -> [Maybe ByteString]
+    -> Either String [Field]
+three fields first second third raw =
+    fields <$> blob raw 0 first <*> blob raw 1 second <*> blob raw 2 third
+
+blob :: [Maybe ByteString] -> Int -> String -> Either String ByteString
+blob blobs index what = maybe (Left ("raw carries no " ++ what)) Right (blobs `at` index)
+
+echoed :: [String] -> Fields -> Either String [String]
+echoed names fields = mapM (written fields) names
+
+writing :: [String] -> (Fields -> Either String ByteString) -> Fields -> Either String [String]
+writing echoes body fields = do
+    first <- echoed echoes fields
+    built <- packed fields =<< body fields
+    pure (first ++ [hex built])
 
 identity :: ByteString -> [Field]
 identity raw = gated (Identity.publicKey raw) publicKeyFields
@@ -644,9 +684,9 @@ verdict :: Bool -> Value
 verdict held = Keyword (if held then "yes" else "no")
 
 readBlobs :: FilePath -> IO [Maybe ByteString]
-readBlobs path = mapM blob . C.words =<< B.readFile path
+readBlobs path = mapM read' . C.words =<< B.readFile path
   where
-    blob token
+    read' token
         | token == C.pack "-" = pure Nothing
         | otherwise = case Encoding.convertFromBase Encoding.Base16 token of
             Left reason -> die (path ++ ": " ++ reason)
@@ -654,40 +694,13 @@ readBlobs path = mapM blob . C.words =<< B.readFile path
 
 at :: [Maybe ByteString] -> Int -> Maybe ByteString
 at blobs index = case drop index blobs of
-    (blob : _) -> blob
+    (held : _) -> held
     [] -> Nothing
 
 -- | Writing raw back from the fields. The table this runs from is its
 -- own, and the round trip is what holds it to the one the decoders
 -- read.
 type Fields = [(String, String)]
-
-encode :: String -> Fields -> Maybe (Either String [String])
-encode kind fields = case kind of
-    "identity" -> Just (echoed ["public_key"])
-    "keyset" -> Just (echoed ["private_key"])
-    "destination" -> Just (echoed ["name", "identity_hash"])
-    "plain" -> Just (rebuilt [] (part fields "plaintext"))
-    "announce" -> Just (rebuilt [] (announced fields))
-    "pathrequest" -> Just (rebuilt [] (asking fields))
-    "group" -> Just (rebuilt ["group_key"] (Token.pack <$> sealed fields))
-    "encrypted" -> Just (rebuilt ["recipient_private", "ratchet_private"] (enveloped fields))
-    "linkrequest" -> Just (rebuilt [] (requesting fields))
-    "linkproof" -> Just (rebuilt ["link_request", "signer_public"] (proving fields))
-    "linkdata" -> Just (rebuilt ["link_request", "responder_private"] (onLink fields))
-    "proof" -> Just (rebuilt ["proved_packet", "signer_public"] (proven fields))
-    "resourceproof" -> Just (rebuilt ["advertised_hash"] (delivered fields))
-    "ifac" -> Just (masking fields)
-    "signature" -> Just (unrecorded)
-    "sign" -> Just (unrecorded)
-    _ -> Nothing
-  where
-    echoed = mapM (written fields)
-
-    rebuilt echoes body = do
-        first <- echoed echoes
-        built <- packed fields =<< body
-        pure (first ++ [hex built])
 
 unrecorded :: Either String [String]
 unrecorded = Left "raw holds the message, and expect records it by its length and its hash"
