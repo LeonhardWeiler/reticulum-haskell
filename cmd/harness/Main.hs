@@ -496,56 +496,74 @@ header :: Packet.Packet -> [Field]
 header unpacked =
     [ ("flags", byte (Packet.flags unpacked))
     , ("header_type", Dec (case Packet.headerType unpacked of Packet.Header1 -> 1; Packet.Header2 -> 2))
-    , ("context_flag", Keyword (if Packet.contextFlag unpacked then "set" else "unset"))
-    , ("transport_type", Keyword (case Packet.transportType unpacked of Packet.Broadcast -> "broadcast"; Packet.Transport -> "transport"))
-    , ("destination_type", Keyword (destinationType (Packet.destinationType unpacked)))
-    , ("packet_type", Keyword (packetType (Packet.packetType unpacked)))
+    , ("context_flag", spelled contextFlags (Packet.contextFlag unpacked))
+    , ("transport_type", spelled transportTypes (Packet.transportType unpacked))
+    , ("destination_type", spelled destinationTypes (Packet.destinationType unpacked))
+    , ("packet_type", spelled packetTypes (Packet.packetType unpacked))
     , ("hops", Dec (fromIntegral (Packet.hops unpacked)))
     , ("transport_id", maybe Absent Hex (Packet.transportId unpacked))
     , ("destination_hash", Hex (Packet.address unpacked))
     , ("context", context (Packet.context unpacked))
     , ("payload_length", Dec (B.length (Packet.payload unpacked)))
     ]
-  where
-    destinationType kind = case kind of
-        Packet.Single -> "single"
-        Packet.Group -> "group"
-        Packet.Plain -> "plain"
-        Packet.Link -> "link"
-    packetType kind = case kind of
-        Packet.Data -> "data"
-        Packet.Announce -> "announce"
-        Packet.LinkRequest -> "linkrequest"
-        Packet.Proof -> "proof"
+
+-- | Every keyword this harness prints is one it reads back, so each of
+-- them is written once and both directions are the one table.
+contextFlags :: [(String, Bool)]
+contextFlags = [("set", True), ("unset", False)]
+
+transportTypes :: [(String, Packet.TransportType)]
+transportTypes = [("broadcast", Packet.Broadcast), ("transport", Packet.Transport)]
+
+destinationTypes :: [(String, Packet.DestinationType)]
+destinationTypes =
+    [ ("single", Packet.Single)
+    , ("group", Packet.Group)
+    , ("plain", Packet.Plain)
+    , ("link", Packet.Link)
+    ]
+
+packetTypes :: [(String, Packet.PacketType)]
+packetTypes =
+    [ ("data", Packet.Data)
+    , ("announce", Packet.Announce)
+    , ("linkrequest", Packet.LinkRequest)
+    , ("proof", Packet.Proof)
+    ]
+
+contexts :: [(String, Packet.Context)]
+contexts =
+    [ ("none", Packet.None)
+    , ("resource", Packet.Resource)
+    , ("resource_adv", Packet.ResourceAdv)
+    , ("resource_req", Packet.ResourceReq)
+    , ("resource_hmu", Packet.ResourceHmu)
+    , ("resource_prf", Packet.ResourcePrf)
+    , ("resource_icl", Packet.ResourceIcl)
+    , ("resource_rcl", Packet.ResourceRcl)
+    , ("request", Packet.Request)
+    , ("response", Packet.Response)
+    , ("path_response", Packet.PathResponse)
+    , ("channel", Packet.Channel)
+    , ("keepalive", Packet.Keepalive)
+    , ("link_identify", Packet.LinkIdentify)
+    , ("link_close", Packet.LinkClose)
+    , ("link_proof", Packet.LinkProof)
+    , ("link_rtt", Packet.LinkRtt)
+    , ("link_request_proof", Packet.LinkRequestProof)
+    ]
+
+spelled :: Eq a => [(String, a)] -> a -> Value
+spelled table held = case [word | (word, named) <- table, named == held] of
+    (word : _) -> Keyword word
+    [] -> Absent
 
 -- | The field format spells a context as a keyword only where a vector
--- carries the byte, so three of them print as the byte instead.
+-- carries the byte, so the four the table does not name print as one.
 context :: Packet.Context -> Value
-context named = case named of
-    Packet.None -> Keyword "none"
-    Packet.Resource -> Keyword "resource"
-    Packet.ResourceAdv -> Keyword "resource_adv"
-    Packet.ResourceReq -> Keyword "resource_req"
-    Packet.ResourceHmu -> Keyword "resource_hmu"
-    Packet.ResourcePrf -> Keyword "resource_prf"
-    Packet.ResourceIcl -> Keyword "resource_icl"
-    Packet.ResourceRcl -> Keyword "resource_rcl"
-    Packet.Request -> Keyword "request"
-    Packet.Response -> Keyword "response"
-    Packet.PathResponse -> Keyword "path_response"
-    Packet.Channel -> Keyword "channel"
-    Packet.Keepalive -> Keyword "keepalive"
-    Packet.LinkIdentify -> Keyword "link_identify"
-    Packet.LinkClose -> Keyword "link_close"
-    Packet.LinkProof -> Keyword "link_proof"
-    Packet.LinkRtt -> Keyword "link_rtt"
-    Packet.LinkRequestProof -> Keyword "link_request_proof"
-    Packet.CacheRequest -> unnamed
-    Packet.Command -> unnamed
-    Packet.CommandStatus -> unnamed
-    Packet.UnnamedContext _ -> unnamed
-  where
-    unnamed = byte (Packet.contextByte named)
+context named = case spelled contexts named of
+    Absent -> byte (Packet.contextByte named)
+    word -> word
 
 rejection :: Packet.Rejection -> [Field]
 rejection broken = case broken of
@@ -775,30 +793,10 @@ packed fields body = Packet.pack <$> shaped fields body
 
 shaped :: Fields -> ByteString -> Either String Packet.Packet
 shaped fields body = do
-    flagged <- keyword fields "context_flag" [("set", True), ("unset", False)]
-    transport <-
-        keyword
-            fields
-            "transport_type"
-            [("broadcast", Packet.Broadcast), ("transport", Packet.Transport)]
-    toward <-
-        keyword
-            fields
-            "destination_type"
-            [ ("single", Packet.Single)
-            , ("group", Packet.Group)
-            , ("plain", Packet.Plain)
-            , ("link", Packet.Link)
-            ]
-    kind <-
-        keyword
-            fields
-            "packet_type"
-            [ ("data", Packet.Data)
-            , ("announce", Packet.Announce)
-            , ("linkrequest", Packet.LinkRequest)
-            , ("proof", Packet.Proof)
-            ]
+    flagged <- keyword fields "context_flag" contextFlags
+    transport <- keyword fields "transport_type" transportTypes
+    toward <- keyword fields "destination_type" destinationTypes
+    kind <- keyword fields "packet_type" packetTypes
     count <- decimal fields "hops"
     relay <- given fields "transport_id"
     hashed <- part fields "destination_hash"
@@ -819,32 +817,11 @@ shaped fields body = do
 contextOf :: Fields -> Either String Packet.Context
 contextOf fields = do
     value <- written fields "context"
-    case lookup value names of
+    case lookup value contexts of
         Just found -> Right found
         Nothing -> case B.unpack <$> unhex "context" value of
             Right [single] -> Right (Packet.toContext single)
             _ -> Left ("unusable context " ++ value)
-  where
-    names =
-        [ ("none", Packet.None)
-        , ("resource", Packet.Resource)
-        , ("resource_adv", Packet.ResourceAdv)
-        , ("resource_req", Packet.ResourceReq)
-        , ("resource_hmu", Packet.ResourceHmu)
-        , ("resource_prf", Packet.ResourcePrf)
-        , ("resource_icl", Packet.ResourceIcl)
-        , ("resource_rcl", Packet.ResourceRcl)
-        , ("request", Packet.Request)
-        , ("response", Packet.Response)
-        , ("path_response", Packet.PathResponse)
-        , ("channel", Packet.Channel)
-        , ("keepalive", Packet.Keepalive)
-        , ("link_identify", Packet.LinkIdentify)
-        , ("link_close", Packet.LinkClose)
-        , ("link_proof", Packet.LinkProof)
-        , ("link_rtt", Packet.LinkRtt)
-        , ("link_request_proof", Packet.LinkRequestProof)
-        ]
 
 written :: Fields -> String -> Either String String
 written fields name = maybe (Left ("expect carries no " ++ name)) Right (lookup name fields)
