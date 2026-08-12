@@ -9,7 +9,9 @@ module Reticulum.Transport
     , uniqueTag
     , accepted
     , counted
+    , Seen
     , admitted
+    , recalled
     , remembered
     , Route (..)
     , outbound
@@ -42,8 +44,6 @@ import qualified Data.ByteString.Char8 as C
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Word (Word8)
 
 import Reticulum.Destination (DestinationHash (DestinationHash, destinationHashBytes), Name)
@@ -105,7 +105,17 @@ accepted = isJust . tag
 counted :: Packet -> Packet
 counted packet = packet {Packet.hops = Packet.hops packet + 1}
 
-admitted :: ByteString -> Set ByteString -> Packet -> Bool
+-- | When a hash was first seen, so that what is remembered against
+-- duplicates does not grow for as long as the node runs.
+type Seen = Map ByteString Time
+
+seenLifetime :: Double
+seenLifetime = 8 * 60
+
+recalled :: Time -> Seen -> Seen
+recalled now = Map.filter (\first -> seconds first + seenLifetime > seconds now)
+
+admitted :: ByteString -> Seen -> Packet -> Bool
 admitted ours seen packet
     | Just elsewhere <- Packet.transportId packet
     , Packet.packetType packet /= Packet.Announce =
@@ -113,7 +123,7 @@ admitted ours seen packet
     | Packet.context packet `elem` carried = True
     | Packet.destinationType packet `elem` [Packet.Plain, Packet.Group] =
         Packet.packetType packet /= Packet.Announce && Packet.hops packet <= 1
-    | Packet.packetHash packet `Set.notMember` seen = True
+    | Packet.packetHash packet `Map.notMember` seen = True
     | otherwise =
         Packet.packetType packet == Packet.Announce
             && Packet.destinationType packet == Packet.Single

@@ -38,8 +38,6 @@ import qualified Data.ByteString.Lazy as Lazy
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Unique (Unique, newUnique)
 import Data.Word (Word64, Word8)
@@ -134,11 +132,11 @@ data Node = Node
     , returns :: MVar (Transport.Reverse Interface)
     , links :: MVar (Transport.Links Interface)
     , announces :: MVar (Map DestinationHash Packet)
-    , seen :: MVar (Set ByteString)
+    , seen :: MVar Transport.Seen
     , local :: MVar (Map DestinationHash Local)
     , sessions :: MVar (Map ByteString Session)
     , pending :: MVar (Map ByteString Opening)
-    , requests :: MVar (Set ByteString)
+    , requests :: MVar Transport.Seen
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
     , sweeper :: Maybe ThreadId
     }
@@ -159,11 +157,11 @@ start how private handler = case Identity.toPublic private of
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
-                <*> newMVar Set.empty
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
                 <*> newMVar Map.empty
-                <*> newMVar Set.empty
+                <*> newMVar Map.empty
+                <*> newMVar Map.empty
         let built = node handler Nothing
         thread <- forkIO (forever (threadDelay sweepInterval >> sweep built))
         pure (Right built {sweeper = Just thread})
@@ -194,13 +192,14 @@ inbound node through raw
 taken :: Node -> Interface -> Packet -> IO ()
 taken node through packet = do
     crossings <- readMVar (links node)
-    allowed <- modifyMVar (seen node) (pure . filtered crossings)
+    now <- clock
+    allowed <- modifyMVar (seen node) (pure . filtered crossings now)
     when allowed (sorted node through packet)
   where
-    filtered crossings hashes
+    filtered crossings now hashes
         | not verdict = (hashes, False)
         | Transport.remembered crossings packet =
-            (Set.insert (Packet.packetHash packet) hashes, True)
+            (Map.insert (Packet.packetHash packet) now hashes, True)
         | otherwise = (hashes, True)
       where
         verdict = Transport.admitted (ours node) hashes packet
@@ -748,7 +747,7 @@ relay node through packet = do
                 case out of
                     Nothing -> pure ()
                     Just onward -> do
-                        modifyMVar_ (seen node) (pure . Set.insert (Packet.packetHash packet))
+                        modifyMVar_ (seen node) (pure . Map.insert (Packet.packetHash packet) now)
                         transmit onward (Packet.pack packet)
 
 -- | The proof for a link this node is in the middle of is checked with
@@ -783,6 +782,8 @@ adjusted node (destination, away) =
 sweepInterval :: Int
 sweepInterval = 1000 * 1000
 
+-- | An announce is kept for as long as there is a path it was learned
+-- from, and every other table here has its own way of running out.
 sweep :: Node -> IO ()
 sweep node = do
     now <- clock
@@ -791,8 +792,14 @@ sweep node = do
     mapM_ (rebroadcast node) due
     modifyMVar_ (returns node) (pure . Transport.forgotten now interfaces)
     modifyMVar_ (links node) (pure . Transport.aged now interfaces)
+    modifyMVar_ (seen node) (pure . Transport.recalled now)
+    modifyMVar_ (requests node) (pure . Transport.recalled now)
+    reachable <- modifyMVar (table node) (pure . twice . Map.filter (not . Path.expired now))
+    modifyMVar_ (announces node) (pure . (`Map.intersection` reachable))
     running <- readMVar (sessions node)
     mapM_ (timed node now interfaces) (Map.toList running)
+  where
+    twice kept = (kept, kept)
 
 -- | The end that opened the link is the end that wakes it, and a link
 -- nothing has come in on for two intervals is one either end closes; one
@@ -1007,12 +1014,13 @@ asked node through packet = case Transport.pathRequest (Packet.payload packet) o
     Right wanted
         | not (Transport.accepted wanted) -> pure ()
         | otherwise -> do
-            first <- modifyMVar (requests node) (pure . noted wanted)
+            now <- clock
+            first <- modifyMVar (requests node) (pure . noted wanted now)
             when first (answer node through wanted)
   where
-    noted wanted tags = case Transport.uniqueTag wanted of
+    noted wanted now tags = case Transport.uniqueTag wanted of
         Nothing -> (tags, False)
-        Just unique -> (Set.insert unique tags, unique `Set.notMember` tags)
+        Just unique -> (Map.insert unique now tags, unique `Map.notMember` tags)
 
 -- | A destination of this node's own is announced again; one it only
 -- knows a path to is answered with the announce that path was learned
