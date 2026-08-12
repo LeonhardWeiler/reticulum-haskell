@@ -136,33 +136,23 @@ bigEndian width bytes
     | B.length bytes < width = Nothing
     | otherwise = Just (Bytes.bigEndian (B.take width bytes), B.drop width bytes)
 
--- | A body that announces more than it holds yields what it held, and
--- the reader stops reading rather than stopping.
 array :: Int -> ByteString -> (Value, ByteString)
-array count bytes = (Array held, rest)
-  where
-    (held, rest) = many count bytes
-
-many :: Int -> ByteString -> ([Value], ByteString)
-many count bytes
-    | count <= 0 = ([], bytes)
-    | otherwise = case value bytes of
-        Nothing -> ([], bytes)
-        Just (held, after) -> let (more, rest) = many (count - 1) after in (held : more, rest)
+array count bytes = let (held, rest) = many count value bytes in (Array held, rest)
 
 pairs :: Int -> ByteString -> (Value, ByteString)
-pairs count bytes = (Map held, rest)
+pairs count bytes = let (held, rest) = many count pair bytes in (Map held, rest)
   where
-    (held, rest) = twos count bytes
-
-twos :: Int -> ByteString -> ([(Value, Value)], ByteString)
-twos count bytes
-    | count <= 0 = ([], bytes)
-    | otherwise = case both of
-        Nothing -> ([], bytes)
-        Just (pair, after) -> let (more, rest) = twos (count - 1) after in (pair : more, rest)
-  where
-    both = do
-        (key, after) <- value bytes
+    pair from = do
+        (key, after) <- value from
         (held, rest) <- value after
         Just ((key, held), rest)
+
+-- | A body that announces more than it holds yields what it held, and
+-- the reader stops reading rather than stopping.
+many :: Int -> (ByteString -> Maybe (a, ByteString)) -> ByteString -> ([a], ByteString)
+many count read' bytes
+    | count <= 0 = ([], bytes)
+    | otherwise = case read' bytes of
+        Nothing -> ([], bytes)
+        Just (held, after) ->
+            let (more, rest) = many (count - 1) read' after in (held : more, rest)
