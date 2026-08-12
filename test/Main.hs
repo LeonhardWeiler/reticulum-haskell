@@ -106,6 +106,16 @@ expect what wanted got
 require :: String -> Bool -> Either String ()
 require what met = if met then Right () else Left what
 
+-- | The step after one that may have gone wrong, so that a check reads
+-- down the page instead of stepping to the right.
+(?>) :: IO (Either String a) -> (a -> IO (Either String b)) -> IO (Either String b)
+outcome ?> step = outcome >>= either (pure . Left) step
+
+infixl 1 ?>
+
+orFail :: String -> IO (Maybe a) -> IO (Either String a)
+orFail what look = maybe (Left what) Right <$> look
+
 vector :: ByteString
 vector = B.replicate Token.blockSize 0x0f
 
@@ -685,26 +695,16 @@ linkOpened :: IO (Either String ())
 linkOpened = do
     took <- newIORef []
     (near, emitter) <- twoNodes Node.silent {Node.delivered = keeping took}
-    found <- waitFor (reached near emitter)
-    case found of
-        Nothing -> pure (Left "the announce did not arrive")
-        Just _ -> do
-            proofs <- newIORef []
-            opened <-
-                Node.open
-                    near
-                    (Destination.DestinationHash (addressOf emitter))
-                    Node.silent {Node.proved = keeping proofs}
-            case opened of
-                Left reason -> pure (Left reason)
-                Right link -> do
-                    sent <- waitFor (Node.speak near link overTheLink)
-                    arrived <- gathered took
-                    proved <- gathered proofs
-                    pure $ do
-                        require "the link did not open" (isJust sent)
-                        expect "what crossed the link" [overTheLink] arrived
-                        expect "the hash the proof named" (maybe [] pure sent) proved
+    announceHeard near emitter ?> \_ -> do
+        proofs <- newIORef []
+        opened near emitter Node.silent {Node.proved = keeping proofs} ?> \link -> do
+            sent <- waitFor (Node.speak near link overTheLink)
+            arrived <- gathered took
+            proved <- gathered proofs
+            pure $ do
+                require "the link did not open" (isJust sent)
+                expect "what crossed the link" [overTheLink] arrived
+                expect "the hash the proof named" (maybe [] pure sent) proved
 
 -- | Both ends this node's own: the close one of them writes, the end
 -- that hears it, and the link that carries nothing afterwards.
@@ -715,27 +715,17 @@ linkClosed byOpener = do
     (far, _, emitter) <- started False
     wire "one" near far
     holding far Node.silent {Node.closed = keeping ends ()}
-    found <- waitFor (reached near emitter)
-    case found of
-        Nothing -> pure (Left "the announce did not arrive")
-        Just _ -> do
-            here <- newIORef []
-            opened <-
-                Node.open
-                    near
-                    (Destination.DestinationHash (addressOf emitter))
-                    Node.silent {Node.closed = keeping here ()}
-            case opened of
-                Left reason -> pure (Left reason)
-                Right link -> do
-                    sent <- waitFor (Node.speak near link overTheLink)
-                    Node.close (if byOpener then near else far) link
-                    heard <- gathered (if byOpener then ends else here)
-                    after <- Node.speak near link overTheLink
-                    pure $ do
-                        require "the link did not open" (isJust sent)
-                        expect "what the end that did not write it heard" [()] heard
-                        require "the link carried a packet after the close" (isNothing after)
+    announceHeard near emitter ?> \_ -> do
+        here <- newIORef []
+        opened near emitter Node.silent {Node.closed = keeping here ()} ?> \link -> do
+            sent <- waitFor (Node.speak near link overTheLink)
+            Node.close (if byOpener then near else far) link
+            told <- gathered (if byOpener then ends else here)
+            after <- Node.speak near link overTheLink
+            pure $ do
+                require "the link did not open" (isJust sent)
+                expect "what the end that did not write it heard" [()] told
+                require "the link carried a packet after the close" (isNothing after)
 
 -- | The interval gone by in either direction is what makes a keepalive
 -- due, and two of them with nothing coming in end the link.
@@ -747,8 +737,8 @@ whenWoken = do
         not (Link.waking later (Link.crossed now) {Link.woken = later - 1})
     require "what only went out is counted as something coming in" $
         Link.waking later (Link.crossed now) {Link.outbound = later}
-    require "one interval of Node.silent is stale" (not (Link.stale later (Link.crossed now)))
-    require "two intervals of Node.silent are not" $
+    require "one interval of quiet is stale" (not (Link.stale later (Link.crossed now)))
+    require "two intervals of quiet are not" $
         Link.stale (later + Link.keepaliveInterval) (Link.crossed now)
   where
     now = 1000
@@ -760,27 +750,18 @@ whenWoken = do
 requestSent :: Int -> IO (Either String ())
 requestSent size = do
     (near, emitter) <- twoNodes Node.silent {Node.requested = Map.singleton path (pure . Just . B.reverse)}
-    found <- waitFor (reached near emitter)
-    case found of
-        Nothing -> pure (Left "the announce did not arrive")
-        Just _ -> do
-            answers <- newIORef []
-            opened <-
-                Node.open
-                    near
-                    (Destination.DestinationHash (addressOf emitter))
-                    Node.silent {Node.answered = \named given -> keeping answers (named, given)}
-            case opened of
-                Left reason -> pure (Left reason)
-                Right link -> do
-                    sent <- waitFor (Node.ask near link echo body)
-                    given <- gathered answers
-                    pure $ do
-                        require "the request did not go" (isJust sent)
-                        expect
-                            "the answer and the id it names"
-                            [(fromMaybe B.empty sent, B.reverse body)]
-                            given
+    announceHeard near emitter ?> \_ -> do
+        answers <- newIORef []
+        let took named given = keeping answers (named, given)
+        opened near emitter Node.silent {Node.answered = took} ?> \link -> do
+            sent <- waitFor (Node.ask near link echo body)
+            given <- gathered answers
+            pure $ do
+                require "the request did not go" (isJust sent)
+                expect
+                    "the answer and the id it names"
+                    [(fromMaybe B.empty sent, B.reverse body)]
+                    given
   where
     echo = C.pack "echo"
     path = Request.named echo
@@ -792,27 +773,17 @@ resourceGiven :: Int -> IO (Either String ())
 resourceGiven size = do
     took <- newIORef []
     (near, emitter) <- twoNodes Node.silent {Node.assembled = keeping took}
-    found <- waitFor (reached near emitter)
-    case found of
-        Nothing -> pure (Left "the announce did not arrive")
-        Just _ -> do
-            proofs <- newIORef []
-            opened <-
-                Node.open
-                    near
-                    (Destination.DestinationHash (addressOf emitter))
-                    Node.silent {Node.proved = keeping proofs}
-            case opened of
-                Left reason -> pure (Left reason)
-                Right link -> do
-                    handed <- waitFor (Node.hand near link body)
-                    arrived <- gathered took
-                    proved <- gathered proofs
-                    pure $ do
-                        require "the resource did not go" (isJust handed)
-                        expect "how much the far end took" [B.length body] (map B.length arrived)
-                        expect "what the far end took" [digest body] (map digest arrived)
-                        expect "the resource the proof named" (maybe [] pure handed) proved
+    announceHeard near emitter ?> \_ -> do
+        proofs <- newIORef []
+        opened near emitter Node.silent {Node.proved = keeping proofs} ?> \link -> do
+            handed <- waitFor (Node.hand near link body)
+            arrived <- gathered took
+            proved <- gathered proofs
+            pure $ do
+                require "the resource did not go" (isJust handed)
+                expect "how much the far end took" [B.length body] (map B.length arrived)
+                expect "what the far end took" [digest body] (map digest arrived)
+                expect "the resource the proof named" (maybe [] pure handed) proved
   where
     body = grain size
 
@@ -827,6 +798,19 @@ grain :: Int -> ByteString
 grain size = B.take size (B.concat (take (size `div` Identity.hashLength + 1) grains))
   where
     grains = drop 1 (iterate Identity.fullHash (C.pack "the resource this node hands over"))
+
+-- | The announce that has to arrive before a link can be opened, and
+-- the link opened once it has.
+announceHeard :: Node.Node -> Identity.IdentityHash -> IO (Either String (Path.Path Node.Interface))
+announceHeard near emitter =
+    orFail "the announce did not arrive" (waitFor (reached near emitter))
+
+opened :: Node.Node -> Identity.IdentityHash -> Node.Answering -> IO (Either String ByteString)
+opened near emitter hears =
+    Node.open near (Destination.DestinationHash (addressOf emitter)) hears
+
+isData :: Packet.Packet -> Bool
+isData = (== Packet.Data) . Packet.packetType
 
 -- | One node that holds a destination and announces it, and one that
 -- has heard it.
@@ -850,10 +834,7 @@ asked path body =
 
 requestAnswered :: IO (Either String ())
 requestAnswered = do
-    begun <- linked Node.silent {Node.requested = Map.singleton (Request.named echo) (pure . Just . B.reverse)}
-    case begun of
-        Left reason -> pure (Left reason)
-        Right open -> do
+    linked Node.silent {Node.requested = Map.singleton (Request.named echo) (pure . Just . B.reverse)} ?> \open -> do
             unanswered <- crossing open (asked (C.pack "nothing") spoken)
             answered <- crossing open (asked echo spoken)
             pure $ do
@@ -987,17 +968,14 @@ throughTheMiddle = do
         Nothing -> pure (Left "the path to the far node was not learned")
         Just _ -> do
             Node.send near (message (addressOf emitter))
-            passed <- awaited towardFar ((== Packet.Data) . Packet.packetType)
-            case passed of
-                Nothing -> pure (Left "the packet did not cross the node between")
-                Just onward -> do
-                    Node.send far (proofFor onward)
-                    back <- awaited backToNear ((== Packet.Proof) . Packet.packetType)
-                    pure $ do
-                        expect "the transport id on the last hop" Nothing (Packet.transportId onward)
-                        expect "the hops taken" 1 (Packet.hops onward)
-                        expect "what arrived" (C.pack "one packet") (Packet.payload onward)
-                        require "the proof did not come back" (isJust back)
+            orFail "the packet did not cross" (awaited towardFar isData) ?> \onward -> do
+                Node.send far (proofFor onward)
+                back <- awaited backToNear ((== Packet.Proof) . Packet.packetType)
+                pure $ do
+                    expect "the transport id on the last hop" Nothing (Packet.transportId onward)
+                    expect "the hops taken" 1 (Packet.hops onward)
+                    expect "what arrived" (C.pack "one packet") (Packet.payload onward)
+                    require "the proof did not come back" (isJust back)
     Node.stop middle
     pure outcome
 
