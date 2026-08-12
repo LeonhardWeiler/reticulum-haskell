@@ -17,3 +17,6 @@ cryptography library, and what needs each.
                  Data.ByteArray.convert is the way to a ByteString.
                  The harness reads and writes hex through
                  Data.ByteArray.Encoding.
+
+    stm          the node's tables are one value behind one lock, and
+                 what changes two of them changes them together

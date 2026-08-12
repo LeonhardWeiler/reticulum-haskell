@@ -42,6 +42,7 @@ library
                    , crypton
                    , memory
                    , network
+                   , stm
                    , time
 
 executable harness

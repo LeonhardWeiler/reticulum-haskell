@@ -27,7 +27,15 @@ module Reticulum.Node
 
 import qualified Codec.Compression.BZip as BZip
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+import Control.Concurrent.STM
+    ( TVar
+    , atomically
+    , modifyTVar'
+    , newTVarIO
+    , readTVar
+    , readTVarIO
+    , writeTVar
+    )
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forever, void, when)
 import qualified Crypto.Random.Entropy as Entropy
@@ -121,25 +129,67 @@ data Opening = Opening
     , hearing :: Answering
     }
 
+-- | Every table the node keeps, so that what reads two of them reads
+-- them as they stood at one moment.
+data State = State
+    { attached :: [Interface]
+    , table :: Path.Table Interface
+    , waiting :: Transport.Waiting Interface
+    , returns :: Transport.Reverse Interface
+    , links :: Transport.Links Interface
+    , announces :: Map DestinationHash Packet
+    , seen :: Transport.Seen
+    , local :: Map DestinationHash Local
+    , sessions :: Map ByteString Session
+    , pending :: Map ByteString Opening
+    , requests :: Transport.Seen
+    }
+
 data Node = Node
     { identity :: Identity.PrivateKey
     , public :: Identity.PublicKey
     , ours :: ByteString
     , settings :: Settings
-    , attached :: MVar [Interface]
-    , table :: MVar (Path.Table Interface)
-    , waiting :: MVar (Transport.Waiting Interface)
-    , returns :: MVar (Transport.Reverse Interface)
-    , links :: MVar (Transport.Links Interface)
-    , announces :: MVar (Map DestinationHash Packet)
-    , seen :: MVar Transport.Seen
-    , local :: MVar (Map DestinationHash Local)
-    , sessions :: MVar (Map ByteString Session)
-    , pending :: MVar (Map ByteString Opening)
-    , requests :: MVar Transport.Seen
+    , state :: TVar State
     , heard :: DestinationHash -> Announce -> Path.Path Interface -> IO ()
     , sweeper :: Maybe ThreadId
     }
+
+empty :: State
+empty =
+    State
+        { attached = []
+        , table = Map.empty
+        , waiting = Map.empty
+        , returns = Map.empty
+        , links = Map.empty
+        , announces = Map.empty
+        , seen = Map.empty
+        , local = Map.empty
+        , sessions = Map.empty
+        , pending = Map.empty
+        , requests = Map.empty
+        }
+
+tables :: Node -> IO State
+tables = readTVarIO . state
+
+alter :: Node -> (State -> State) -> IO ()
+alter node step = atomically (modifyTVar' (state node) step)
+
+change :: Node -> (State -> (State, a)) -> IO a
+change node step = atomically $ do
+    was <- readTVar (state node)
+    let (now, out) = step was
+    writeTVar (state node) now
+    pure out
+
+onSessions :: Node -> (Map ByteString Session -> Map ByteString Session) -> IO ()
+onSessions node step = alter node (\was -> was {sessions = step (sessions was)})
+
+withSessions :: Node -> (Map ByteString Session -> (Map ByteString Session, a)) -> IO a
+withSessions node step =
+    change node (\was -> let (now, out) = step (sessions was) in (was {sessions = now}, out))
 
 start
     :: Settings
@@ -149,20 +199,17 @@ start
 start how private handler = case Identity.toPublic private of
     Left reason -> pure (Left reason)
     Right key -> do
-        node <-
-            Node private key (Identity.identityHashBytes (Identity.identityHash key)) how
-                <$> newMVar []
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-                <*> newMVar Map.empty
-        let built = node handler Nothing
+        started <- newTVarIO empty
+        let built =
+                Node
+                    { identity = private
+                    , public = key
+                    , ours = Identity.identityHashBytes (Identity.identityHash key)
+                    , settings = how
+                    , state = started
+                    , heard = handler
+                    , sweeper = Nothing
+                    }
         thread <- forkIO (forever (threadDelay sweepInterval >> sweep built))
         pure (Right built {sweeper = Just thread})
 
@@ -170,13 +217,13 @@ stop :: Node -> IO ()
 stop = maybe (pure ()) killThread . sweeper
 
 attach :: Node -> Interface -> IO ()
-attach node through = modifyMVar_ (attached node) (pure . (++ [through]))
+attach node through = alter node (\was -> was {attached = attached was ++ [through]})
 
 detach :: Node -> Interface -> IO ()
-detach node through = modifyMVar_ (attached node) (pure . filter (/= through))
+detach node through = alter node (\was -> was {attached = filter (/= through) (attached was)})
 
 paths :: Node -> IO (Path.Table Interface)
-paths = readMVar . table
+paths = fmap table . tables
 
 clock :: IO Path.Time
 clock = Path.Time . realToFrac <$> getPOSIXTime
@@ -191,9 +238,9 @@ inbound node through raw
 
 taken :: Node -> Interface -> Packet -> IO ()
 taken node through packet = do
-    crossings <- readMVar (links node)
+    crossings <- links <$> tables node
     now <- clock
-    allowed <- modifyMVar (seen node) (pure . filtered crossings now)
+    allowed <- change node (\was -> let (kept, out) = filtered crossings now (seen was) in (was {seen = kept}, out))
     when allowed (sorted node through packet)
   where
     filtered crossings now hashes
@@ -209,14 +256,12 @@ sorted node through packet
     | Packet.packetType packet == Packet.Announce = announced node through packet
     | Packet.address packet == Transport.pathRequestAddress = asked node through packet
     | otherwise = do
-        mine <- readMVar (local node)
-        running <- readMVar (sessions node)
-        asking' <- readMVar (pending node)
-        case Map.lookup (DestinationHash (Packet.address packet)) mine of
+        now <- tables node
+        case Map.lookup (DestinationHash (Packet.address packet)) (local now) of
             Just held -> arrived node through held packet
-            Nothing -> case Map.lookup (Packet.address packet) running of
+            Nothing -> case Map.lookup (Packet.address packet) (sessions now) of
                 Just session -> spoken node through session packet
-                Nothing -> case Map.lookup (Packet.address packet) asking' of
+                Nothing -> case Map.lookup (Packet.address packet) (pending now) of
                     Just wanted -> proven node through wanted packet
                     Nothing -> forwarding node (relay node through packet)
 
@@ -244,7 +289,7 @@ opening node through held packet = case Link.request (Packet.payload packet) of
             case Link.answered (identity node) scalar link wanted of
                 Left reason -> hPutStrLn stderr ("link: " ++ reason)
                 Right (shook, body) -> do
-                    modifyMVar_ (sessions node) (pure . Map.insert link (begun shook now wanted))
+                    onSessions node (Map.insert link (begun shook now wanted))
                     transmit through (Packet.pack (written body))
   where
     link = Link.linkId packet
@@ -286,7 +331,7 @@ spoken node through session packet
     | through /= at session = pure ()
     | otherwise = do
         now <- clock
-        modifyMVar_ (sessions node) (pure . Map.adjust (came now) link)
+        onSessions node (Map.adjust (came now) link)
         case Packet.packetType packet of
             Packet.Data -> data'
             Packet.Proof -> proof'
@@ -331,7 +376,7 @@ spoken node through session packet
     ended = case Resource.proof (Packet.payload packet) of
         Left _ -> pure ()
         Right written -> do
-            done <- modifyMVar (sessions node) (pure . dropping written)
+            done <- withSessions node (dropping written)
             mapM_ (moving node session link) done
     dropping written running = case Map.lookup link running of
         Just held
@@ -344,9 +389,9 @@ spoken node through session packet
     names plain = case Link.identify plain of
         Just who
             | Link.identifyValid link who ->
-                modifyMVar_
-                    (sessions node)
-                    (pure . Map.adjust (\held -> held {identified = Just (Link.identityPublic who)}) link)
+                onSessions
+                    node
+                    (Map.adjust (\held -> held {identified = Just (Link.identityPublic who)}) link)
         _ -> pure ()
     closes plain = when (plain == link) (ending node session link)
 
@@ -364,7 +409,7 @@ writing :: Node -> Session -> Packet -> IO ()
 writing node session packet = do
     transmit (at session) (Packet.pack packet)
     now <- clock
-    modifyMVar_ (sessions node) (pure . Map.adjust (wrote now) (Packet.address packet))
+    onSessions node (Map.adjust (wrote now) (Packet.address packet))
   where
     wrote now held = held {traffic = (traffic held) {Link.outbound = Path.seconds now}}
 
@@ -372,7 +417,7 @@ writing node session packet = do
 -- it hears so once.
 ending :: Node -> Session -> ByteString -> IO ()
 ending node session link = do
-    was <- modifyMVar (sessions node) (pure . swapped . Map.updateLookupWithKey forget link)
+    was <- withSessions node (swapped . Map.updateLookupWithKey forget link)
     mapM_ (const (closed (answering session))) was
   where
     forget _ _ = Nothing
@@ -381,12 +426,12 @@ ending node session link = do
 -- nothing of the link and is told nothing it did itself.
 close :: Node -> ByteString -> IO ()
 close node link = do
-    running <- readMVar (sessions node)
+    running <- sessions <$> tables node
     case Map.lookup link running of
         Nothing -> pure ()
         Just session -> do
             _ <- sending node session link Packet.LinkClose link
-            modifyMVar_ (sessions node) (pure . Map.delete link)
+            onSessions node (Map.delete link)
 
 -- | The request is answered under the id of the packet that asked.
 asking :: Node -> Session -> Packet -> ByteString -> IO ()
@@ -436,7 +481,7 @@ advertised node session link plain = case Resource.advertisement plain of
     Right told -> case Resource.taking (Link.partSize (unit session)) told of
         Nothing -> pure ()
         Just begun -> do
-            modifyMVar_ (sessions node) (pure . Map.adjust (keeping begun) link)
+            onSessions node (Map.adjust (keeping begun) link)
             wanting node session link (Resource.resource begun)
   where
     keeping begun held =
@@ -444,7 +489,7 @@ advertised node session link plain = case Resource.advertisement plain of
 
 wanting :: Node -> Session -> ByteString -> ByteString -> IO ()
 wanting node session link wanted = do
-    payload <- modifyMVar (sessions node) (pure . stepped)
+    payload <- withSessions node (stepped)
     mapM_ (sending node session link Packet.ResourceReq) payload
   where
     stepped running = case Map.lookup link running >>= (Map.lookup wanted . taking) of
@@ -458,7 +503,7 @@ updated :: Node -> Session -> ByteString -> ByteString -> IO ()
 updated node session link plain = case Resource.update plain of
     Left _ -> pure ()
     Right told -> do
-        modifyMVar_ (sessions node) (pure . Map.adjust (learning told) link)
+        onSessions node (Map.adjust (learning told) link)
         wanting node session link (Resource.updatedResource told)
   where
     learning told held =
@@ -466,7 +511,7 @@ updated node session link plain = case Resource.update plain of
 
 forgotten :: Node -> ByteString -> ByteString -> IO ()
 forgotten node link plain =
-    modifyMVar_ (sessions node) (pure . Map.adjust dropping link)
+    onSessions node (Map.adjust dropping link)
   where
     dropping held = held {taking = Map.delete (Resource.cancel plain) (taking held)}
 
@@ -474,7 +519,7 @@ forgotten node link plain =
 -- one whose window holds its hash is the one that keeps it.
 piece :: Node -> Session -> ByteString -> ByteString -> IO ()
 piece node session link raw = do
-    moved <- modifyMVar (sessions node) (pure . advanced)
+    moved <- withSessions node (advanced)
     mapM_ (advancing node session link) moved
   where
     advanced running = case Map.lookup link running of
@@ -513,7 +558,7 @@ assembling node session link held stream = do
     expanded body
         | Resource.compressed held = maybe (pure Nothing) decompressed body
         | otherwise = pure body
-    forget = modifyMVar_ (sessions node) (pure . Map.adjust dropping link)
+    forget = onSessions node (Map.adjust dropping link)
     dropping running = running {taking = Map.delete (Resource.resource held) (taking running)}
 
 -- | The decompressor throws on bytes that are not what it takes, and
@@ -529,9 +574,9 @@ decompressed body = do
 collected :: Node -> ByteString -> Resource.Taking -> ByteString -> IO (Maybe ByteString)
 collected node link held body
     | Resource.index held < Resource.segments held =
-        Nothing <$ modifyMVar_ (sessions node) (pure . Map.adjust keeping link)
+        Nothing <$ onSessions node (Map.adjust keeping link)
     | otherwise = do
-        earlier <- modifyMVar (sessions node) (pure . gathered)
+        earlier <- withSessions node (gathered)
         pure (Just (earlier <> body))
   where
     keeping running =
@@ -565,7 +610,7 @@ giving :: Node -> Session -> ByteString -> ByteString -> IO ()
 giving node session link plain = case Resource.partRequest plain of
     Left _ -> pure ()
     Right wanted -> do
-        outcome <- modifyMVar (sessions node) (pure . stepped wanted)
+        outcome <- withSessions node (stepped wanted)
         case outcome of
             Nothing -> pure ()
             Just (cut, told) -> do
@@ -600,7 +645,7 @@ advertising
     -> Resource.Segment
     -> IO (Maybe ByteString)
 advertising node link asking' body told = do
-    running <- readMVar (sessions node)
+    running <- sessions <$> tables node
     case Map.lookup link running of
         Nothing -> pure Nothing
         Just session -> do
@@ -610,7 +655,7 @@ advertising node link asking' body told = do
                 Nothing -> Nothing <$ hPutStrLn stderr "resource: nothing was sealed"
                 Just stream -> do
                     let kept = made session salt stream
-                    modifyMVar_ (sessions node) (pure . Map.adjust (keeping kept) link)
+                    onSessions node (Map.adjust (keeping kept) link)
                     _ <- sending node session link Packet.ResourceAdv (advertisement kept)
                     pure (Just (Resource.heading kept))
   where
@@ -672,15 +717,15 @@ announced node through packet = case Announce.announce packet of
         | not (Announce.destinationMatch address carried) -> pure ()
         | not (Announce.signatureValid address carried) -> pure ()
         | otherwise -> do
-            mine <- readMVar (local node)
+            mine <- local <$> tables node
             when (destination `Map.notMember` mine) $ do
                 now <- clock
-                forwarding node (modifyMVar_ (waiting node) (pure . Transport.overheard now packet))
-                learned <- modifyMVar (table node) (pure . took now (entry carried))
+                forwarding node (alter node (\was -> was {waiting = Transport.overheard now packet (waiting was)}))
+                learned <- change node (\was -> let (kept, out) = took now (entry carried) (table was) in (was {table = kept}, out))
                 case learned of
                     Nothing -> pure ()
                     Just path -> do
-                        modifyMVar_ (announces node) (pure . Map.insert destination packet)
+                        alter node (\was -> was {announces = Map.insert destination packet (announces was)})
                         forwarding node (queue node now through packet)
                         heard node destination carried path
   where
@@ -707,44 +752,42 @@ queue node now through packet = do
     case Transport.queued now across through packet of
         Nothing -> pure ()
         Just entry ->
-            modifyMVar_
-                (waiting node)
-                (pure . Map.insert (DestinationHash (Packet.address packet)) entry)
+            alter node $ \was ->
+                was {waiting = Map.insert (DestinationHash (Packet.address packet)) entry (waiting was)}
 
 -- | This node was named as the next hop, and where the packet goes
 -- after it is the path table's answer; a proof for what it passed on
 -- goes back the way that packet came.
 relay :: Node -> Interface -> Packet -> IO ()
 relay node through packet = do
-    reachable <- readMVar (table node)
+    reachable <- table <$> tables node
     now <- clock
     case Transport.relayed (ours node) reachable packet of
         Just (path, onward) -> do
-            modifyMVar_
-                (returns node)
-                (pure . Transport.remember through (Path.interface path) now packet)
-            modifyMVar_ (links node) (pure . Transport.crossing now through path packet)
+            alter node $ \was ->
+                was {returns = Transport.remember through (Path.interface path) now packet (returns was)}
+            alter node (\was -> was {links = Transport.crossing now through path packet (links was)})
             transmit (Path.interface path) (Packet.pack onward)
         Nothing
             | Packet.context packet == Packet.LinkRequestProof -> settled node through packet
             | Packet.packetType packet == Packet.Proof -> do
-                back <- modifyMVar (returns node) (pure . swapped . Transport.returned through packet)
+                back <- change node (\was -> let (out, kept) = Transport.returned through packet (returns was) in (was {returns = kept}, out))
                 mapM_ (\out -> transmit out (Packet.pack packet)) back
             | otherwise -> do
-                out <- modifyMVar (links node) (pure . swapped . Transport.alongLink now through packet)
+                out <- change node (\was -> let (onto, kept) = Transport.alongLink now through packet (links was) in (was {links = kept}, onto))
                 case out of
                     Nothing -> pure ()
                     Just onward -> do
-                        modifyMVar_ (seen node) (pure . Map.insert (Packet.packetHash packet) now)
+                        alter node (\was -> was {seen = Map.insert (Packet.packetHash packet) now (seen was)})
                         transmit onward (Packet.pack packet)
 
 -- | The proof for a link this node is in the middle of is checked with
 -- the key the announce for that destination carried.
 settled :: Node -> Interface -> Packet -> IO ()
 settled node through packet = do
-    cached <- readMVar (announces node)
+    cached <- announces <$> tables node
     outcome <-
-        modifyMVar (links node) (pure . swapped . Transport.proofed (valid cached) through packet)
+        change node (\was -> let (out, kept) = Transport.proofed (valid cached) through packet (links was) in (was {links = kept}, out))
     case outcome of
         Nothing -> pure ()
         Just crossed -> do
@@ -765,7 +808,7 @@ settled node through packet = do
 
 adjusted :: Node -> (DestinationHash, Word8) -> IO ()
 adjusted node (destination, away) =
-    modifyMVar_ (table node) (pure . Path.shorten away destination)
+    alter node (\was -> was {table = Path.shorten away destination (table was)})
 
 sweepInterval :: Int
 sweepInterval = 1000 * 1000
@@ -775,19 +818,17 @@ sweepInterval = 1000 * 1000
 sweep :: Node -> IO ()
 sweep node = do
     now <- clock
-    interfaces <- readMVar (attached node)
-    due <- modifyMVar (waiting node) (pure . swapped . Transport.due now)
+    interfaces <- attached <$> tables node
+    due <- change node (\was -> let (out, kept) = Transport.due now (waiting was) in (was {waiting = kept}, out))
     mapM_ (rebroadcast node) due
-    modifyMVar_ (returns node) (pure . Transport.forgotten now interfaces)
-    modifyMVar_ (links node) (pure . Transport.aged now interfaces)
-    modifyMVar_ (seen node) (pure . Transport.recalled now)
-    modifyMVar_ (requests node) (pure . Transport.recalled now)
-    reachable <- modifyMVar (table node) (pure . twice . Map.filter (not . Path.expired now))
-    modifyMVar_ (announces node) (pure . (`Map.intersection` reachable))
-    running <- readMVar (sessions node)
+    alter node (\was -> was {returns = Transport.forgotten now interfaces (returns was)})
+    alter node (\was -> was {links = Transport.aged now interfaces (links was)})
+    alter node (\was -> was {seen = Transport.recalled now (seen was)})
+    alter node (\was -> was {requests = Transport.recalled now (requests was)})
+    reachable <- change node (\was -> let kept = Map.filter (not . Path.expired now) (table was) in (was {table = kept}, kept))
+    alter node (\was -> was {announces = (`Map.intersection` reachable) (announces was)})
+    running <- sessions <$> tables node
     mapM_ (timed node now interfaces) (Map.toList running)
-  where
-    twice kept = (kept, kept)
 
 -- | The end that opened the link is the end that wakes it, and a link
 -- nothing has come in on for two intervals is one either end closes; one
@@ -802,7 +843,7 @@ timed node now interfaces (link, session)
   where
     waken = do
         writing node session (onLink link Packet.Data Packet.Keepalive (B.singleton alive))
-        modifyMVar_ (sessions node) (pure . Map.adjust woke link)
+        onSessions node (Map.adjust woke link)
     woke held = held {traffic = (traffic held) {Link.woken = Path.seconds now}}
 
 swapped :: (a, b) -> (b, a)
@@ -812,7 +853,7 @@ swapped (one, other) = (other, one)
 -- was heard on.
 rebroadcast :: Node -> Transport.Pending Interface -> IO ()
 rebroadcast node entry = do
-    interfaces <- readMVar (attached node)
+    interfaces <- attached <$> tables node
     mapM_ (\through -> transmit through raw) (targets interfaces)
   where
     raw = Packet.pack (Transport.rebroadcast (ours node) entry)
@@ -822,17 +863,16 @@ rebroadcast node entry = do
 
 send :: Node -> Packet -> IO ()
 send node packet = do
-    reachable <- readMVar (table node)
-    case Transport.outbound reachable packet of
+    kept <- tables node
+    case Transport.outbound (table kept) packet of
         Transport.Along through outgoing -> transmit through (Packet.pack outgoing)
-        Transport.Everywhere outgoing -> do
-            interfaces <- readMVar (attached node)
-            mapM_ (\through -> transmit through (Packet.pack outgoing)) interfaces
+        Transport.Everywhere outgoing ->
+            mapM_ (\through -> transmit through (Packet.pack outgoing)) (attached kept)
         Transport.Nowhere -> pure ()
 
 serve :: Node -> Name -> ByteString -> Answering -> IO DestinationHash
 serve node called carried hears = do
-    modifyMVar_ (local node) (pure . Map.insert destination held)
+    alter node (\was -> was {local = Map.insert destination held (local was)})
     pure destination
   where
     hash = Destination.nameHash called
@@ -844,7 +884,7 @@ serve node called carried hears = do
 -- be asked at all.
 open :: Node -> DestinationHash -> Answering -> IO (Either String ByteString)
 open node destination hears = do
-    cached <- readMVar (announces node)
+    cached <- announces <$> tables node
     case Map.lookup destination cached >>= carriedKey of
         Nothing -> pure (Left "nothing was heard from that destination")
         Just key -> do
@@ -855,9 +895,8 @@ open node destination hears = do
                     now <- clock
                     let packet = requesting (destinationHashBytes destination) point
                         link = Link.linkId packet
-                    modifyMVar_
-                        (pending node)
-                        (pure . Map.insert link (Opening secret key now hears))
+                    alter node $ \was ->
+                        was {pending = Map.insert link (Opening secret key now hears) (pending was)}
                     send node packet
                     pure (Right link)
   where
@@ -902,8 +941,8 @@ proven node through wanted packet
                 Just shook -> do
                     now <- clock
                     let session = begun shook now body
-                    modifyMVar_ (sessions node) (pure . Map.insert link session)
-                    modifyMVar_ (pending node) (pure . Map.delete link)
+                    onSessions node (Map.insert link session)
+                    alter node (\was -> was {pending = Map.delete link (pending was)})
                     void (sending node session link Packet.LinkRtt (roundTrip (elapsed now)))
   where
     link = Packet.address packet
@@ -934,7 +973,7 @@ roundTrip = Msgpack.pack . Msgpack.double
 -- and the end that sent the packet is the only one that can.
 speak :: Node -> ByteString -> ByteString -> IO (Maybe ByteString)
 speak node link plain = do
-    running <- readMVar (sessions node)
+    running <- sessions <$> tables node
     case Map.lookup link running of
         Nothing -> pure Nothing
         Just session -> fmap Packet.packetHash <$> sending node session link Packet.None plain
@@ -943,7 +982,7 @@ speak node link plain = do
 -- id that end will hash out of it.
 ask :: Node -> ByteString -> ByteString -> ByteString -> IO (Maybe ByteString)
 ask node link path body = do
-    running <- readMVar (sessions node)
+    running <- sessions <$> tables node
     now <- clock
     case Map.lookup link running of
         Nothing -> pure Nothing
@@ -961,7 +1000,7 @@ ask node link path body = do
 
 announce :: Node -> DestinationHash -> IO ()
 announce node destination = do
-    mine <- readMVar (local node)
+    mine <- local <$> tables node
     mapM_ (\held -> emit node held Packet.None Nothing) (Map.lookup destination mine)
 
 whose :: Node -> Destination.NameHash -> DestinationHash
@@ -1003,7 +1042,7 @@ asked node through packet = case Transport.pathRequest (Packet.payload packet) o
         | not (Transport.accepted wanted) -> pure ()
         | otherwise -> do
             now <- clock
-            first <- modifyMVar (requests node) (pure . noted wanted now)
+            first <- change node (\was -> let (kept, out) = noted wanted now (requests was) in (was {requests = kept}, out))
             when first (answer node through wanted)
   where
     noted wanted now tags = case Transport.uniqueTag wanted of
@@ -1015,19 +1054,17 @@ asked node through packet = case Transport.pathRequest (Packet.payload packet) o
 -- from, and never toward the node the path runs through.
 answer :: Node -> Interface -> Transport.PathRequest -> IO ()
 answer node through wanted = do
-    mine <- readMVar (local node)
+    mine <- local <$> tables node
     case Map.lookup destination mine of
         Just held -> emit node held Packet.PathResponse (Just through)
         Nothing -> forwarding node $ do
-            reachable <- readMVar (table node)
-            cached <- readMVar (announces node)
+            kept <- tables node
             now <- clock
-            case (Map.lookup destination reachable, Map.lookup destination cached) of
+            case (Map.lookup destination (table kept), Map.lookup destination (announces kept)) of
                 (Just path, Just announcement)
                     | Transport.requesterId wanted /= Just (Path.via path) ->
-                        modifyMVar_
-                            (waiting node)
-                            (pure . respond now path announcement)
+                        alter node $ \was ->
+                            was {waiting = respond now path announcement (waiting was)}
                 _ -> pure ()
   where
     destination = DestinationHash (Transport.wantedHash wanted)
