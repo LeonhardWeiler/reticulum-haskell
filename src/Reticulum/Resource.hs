@@ -90,8 +90,8 @@ data Advertisement = Advertisement
     , hashmap :: Maybe ByteString
     }
 
--- | A map is not a sequence, and a reader that goes by position agrees
--- with this reference and with nothing entitled to reorder the keys.
+-- | The keys are read by name, so a writer that reorders them is read
+-- the same way.
 advertisement :: ByteString -> Either Rejection Advertisement
 advertisement plain
     | B.null plain = Left (ShortPlaintext 1)
@@ -120,8 +120,7 @@ advertisement plain
         Just (Msgpack.Bytes bytes) -> Just bytes
         _ -> Nothing
 
--- | The keys are written in the order the reference writes them, and a
--- field it has nothing for is nil and not left out.
+-- | A field with nothing for it is nil and not left out.
 packAdvertisement :: Advertisement -> ByteString
 packAdvertisement value =
     Msgpack.pack
@@ -247,8 +246,6 @@ data Taking = Taking
 window :: Int
 window = 4
 
--- | The parts are as many as the transfer size divided by what one of
--- them carries, and an advertisement that names neither is none.
 taking :: Int -> Advertisement -> Maybe Taking
 taking size told = do
     hash <- resourceHash told
@@ -433,8 +430,6 @@ spanning :: Segment -> ByteString -> Int
 spanning told body =
     (fromIntegral (nth told) - 1) * maxSegmentSize + B.length body + B.length (left told)
 
--- | What goes over the link is the data compressed when that is
--- shorter, and past a size it is the data however well it compresses.
 compressing :: Segment -> ByteString -> (ByteString, Bool)
 compressing told body
     | worth && B.length packed < B.length body = (packed, True)

@@ -126,7 +126,6 @@ dispatch node through packet
                     Just wanted -> linkProved node through wanted packet
                     Nothing -> forwarding node (relay node through packet)
 
--- | A packet for a destination of this node's own goes no further.
 deliver :: Node -> Interface -> Local -> Packet -> IO ()
 deliver node through mine packet
     | Packet.packetType packet == Packet.LinkRequest = answerLink node through mine packet
@@ -252,8 +251,7 @@ awake :: ByteString
 awake = B.singleton 0xfe
 
 
--- | A link that ends is one nothing more crosses, and the end that held
--- it hears so once.
+-- | The end that held the link hears it end once.
 endLink :: Node -> Session -> ByteString -> IO ()
 endLink node session link = do
     was <- withSessions node (swapped . Map.updateLookupWithKey forget link)
@@ -350,9 +348,8 @@ queue node now through packet = do
             alter node $ \was ->
                 was {waiting = Map.insert (DestinationHash (Packet.address packet)) entry (waiting was)}
 
--- | This node was named as the next hop, and where the packet goes
--- after it is the path table's answer; a proof for what it passed on
--- goes back the way that packet came.
+-- | This node was named as the next hop, and a proof for what it
+-- passed on goes back the way that packet came.
 relay :: Node -> Interface -> Packet -> IO ()
 relay node through packet = do
     reachable <- table <$> tables node
@@ -409,7 +406,7 @@ sweepInterval :: Int
 sweepInterval = 1000 * 1000
 
 -- | An announce is kept for as long as there is a path it was learned
--- from, and every other table here has its own way of running out.
+-- from.
 sweep :: Node -> IO ()
 sweep node = do
     now <- clock
@@ -425,9 +422,8 @@ sweep node = do
     running <- sessions <$> tables node
     mapM_ (checkLink node now interfaces) (Map.toList running)
 
--- | The end that opened the link is the end that wakes it, and a link
--- nothing has come in on for two intervals is one either end closes; one
--- whose interface is gone cannot be told about it.
+-- | The end that opened the link is the end that wakes it, and one
+-- whose interface is gone cannot be told it is closed.
 checkLink :: Node -> Path.Time -> [Interface] -> (ByteString, Session) -> IO ()
 checkLink node now interfaces (link, session)
     | at session `notElem` interfaces = endLink node session link
@@ -560,8 +556,8 @@ linkProved node through wanted packet
 roundTrip :: Double -> ByteString
 roundTrip = Msgpack.pack . Msgpack.double
 
--- | The hash goes back because the proof the far end writes names it,
--- and the end that sent the packet is the only one that can.
+-- | The proof the far end writes names the hash of the packet, which
+-- only the end that sent it can compute.
 speak :: Node -> ByteString -> ByteString -> IO (Maybe ByteString)
 speak node link plain = do
     running <- sessions <$> tables node
@@ -640,9 +636,9 @@ onPathRequest node through packet = case Transport.pathRequest (Packet.payload p
         Nothing -> (tags, False)
         Just unique -> (Map.insert unique now tags, unique `Map.notMember` tags)
 
--- | A destination of this node's own is announced again; one it only
--- knows a path to is answered with the announce that path was learned
--- from, and never toward the node the path runs through.
+-- | A destination this node only knows a path to is answered with the
+-- announce that path was learned from, and never toward the node the
+-- path runs through.
 answerPath :: Node -> Interface -> Transport.PathRequest -> IO ()
 answerPath node through wanted = do
     mine <- local <$> tables node

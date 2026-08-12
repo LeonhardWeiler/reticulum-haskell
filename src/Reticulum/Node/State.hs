@@ -90,8 +90,6 @@ data Answering = Answering
     , closed :: IO ()
     }
 
--- | Hears everything and says nothing, so a caller writes down only
--- what it answers.
 silent :: Answering
 silent =
     Answering
@@ -242,8 +240,8 @@ writeOnLink node session packet = do
   where
     wrote now session' = session' {traffic = (traffic session') {Link.outbound = Path.seconds now}}
 
--- | The packet is handed back, because the hash the far end proves is
--- one only the end that sent it can name.
+-- | The packet is handed back: the hash the far end proves is one only
+-- the end that sent it can name.
 sendSealed :: Node -> Session -> ByteString -> Packet.Context -> ByteString -> IO (Maybe Packet)
 sendSealed node session link told plain = do
     vector <- Entropy.getEntropy Token.blockSize

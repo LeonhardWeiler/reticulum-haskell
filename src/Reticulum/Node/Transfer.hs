@@ -49,9 +49,8 @@ serveRequest node session link identifier plain = case Request.request plain of
   where
     serves path = Map.lookup path (requested (answering session))
 
--- | An answer that does not fit in one packet on this link is one the
--- far end takes in as a resource, under the id of the request it
--- answers.
+-- | An answer too long for one packet goes as a resource, under the id
+-- of the request it answers.
 answerRequest :: Node -> Session -> ByteString -> ByteString -> ByteString -> IO ()
 answerRequest node session link identifier body
     | B.length packed > Link.capacity (unit session) =
@@ -156,9 +155,8 @@ expand body = do
     outcome <- try (evaluate (Lazy.toStrict (BZip.decompress (Lazy.fromStrict body))))
     pure (either (\reason -> const Nothing (reason :: SomeException)) Just outcome)
 
--- | A resource in segments is one resource, and only the last of them
--- is answered with what all of them came to; the segment is put away
--- before it is proved, because the next one follows the proof.
+-- | Only the last segment is answered with what all of them came to,
+-- and each is put away before it is proved: the proof brings the next.
 collectSegment :: Node -> ByteString -> Resource.Taking -> ByteString -> IO (Maybe ByteString)
 collectSegment node link taken body
     | Resource.index taken < Resource.segments taken =
@@ -192,8 +190,8 @@ deliverWhole node session link taken whole = case Resource.identifier taken of
         Left _ -> Nothing
         Right taken' -> (,) <$> Request.requestId taken' <*> Request.responseBody taken'
 
--- | The parts go out as they were cut, because the stream they came
--- from was sealed whole and one of them alone opens nothing.
+-- | The stream was sealed whole, so the parts go out as they were cut
+-- and one of them alone opens nothing.
 sendParts :: Node -> Session -> ByteString -> ByteString -> IO ()
 sendParts node session link plain = case Resource.partRequest plain of
     Left _ -> pure ()
@@ -215,8 +213,8 @@ sendParts node session link plain = case Resource.partRequest plain of
     put after session' =
         session' {handing = Map.insert (Resource.given after) after (handing session')}
 
--- | The data is compressed when that is shorter, and what the far end
--- proves is the data and not the stream that carried it.
+-- | What the far end proves is the data, not the stream that carried
+-- it.
 hand :: Node -> ByteString -> ByteString -> IO (Maybe ByteString)
 hand node link body = handOver node link body Nothing
 

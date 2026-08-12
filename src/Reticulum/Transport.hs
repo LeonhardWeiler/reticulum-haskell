@@ -97,8 +97,7 @@ pack request =
 uniqueTag :: PathRequest -> Maybe ByteString
 uniqueTag request = mappend (wantedHash request) . B.take addressLength <$> tag request
 
--- | A request with no tag reaches no duplicate check and is dropped
--- after it has been read.
+-- | A request with no tag reaches no duplicate check.
 accepted :: PathRequest -> Bool
 accepted = isJust . tag
 
@@ -106,8 +105,6 @@ accepted = isJust . tag
 counted :: Packet -> Packet
 counted packet = packet {Packet.hops = Packet.hops packet + 1}
 
--- | When a hash was first seen, so that what is remembered against
--- duplicates does not grow for as long as the node runs.
 type Seen = Map ByteString Time
 
 seenLifetime :: Double
@@ -149,9 +146,7 @@ remembered links packet =
         )
         && Packet.address packet `Map.notMember` links
 
--- | A packet the node knows a path for goes out on the one interface
--- that path was heard on, and one already carrying a transport id
--- cannot be given another.
+-- | A packet already carrying a transport id cannot be given another.
 data Route i
     = Along i Packet
     | Everywhere Packet
@@ -285,8 +280,7 @@ proofed valid through packet links = case Map.lookup key links of
     key = Packet.address packet
     settled entry = Map.insert key entry {proven = True} links
 
--- | A link that was never proved is given the time its request needed,
--- and one that was is kept as long as it could still carry a packet.
+-- | A link that was never proved is given the time its request needed.
 aged :: Eq i => Time -> [i] -> Links i -> Links i
 aged now attached = Map.filter alive
   where
@@ -325,7 +319,6 @@ returned through packet backwards = case Map.lookup (Packet.address packet) back
         , Map.delete (Packet.address packet) backwards
         )
 
--- | An entry whose way back is gone is as spent as one that timed out.
 forgotten :: Eq i => Time -> [i] -> Reverse i -> Reverse i
 forgotten now attached = Map.filter alive
   where

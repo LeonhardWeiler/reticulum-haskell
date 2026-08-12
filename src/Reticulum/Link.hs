@@ -221,9 +221,8 @@ waking now held =
 stale :: Double -> Traffic -> Bool
 stale now held = now >= inbound held + staleTime
 
--- | The decoder returns the three bits it read whatever they are, and
--- a packet that signals nothing reads as the one mode the reference
--- enables.
+-- | The three bits are returned whatever they are, and a packet that
+-- signals nothing reads as aes256_cbc.
 mode :: Maybe ByteString -> Word8
 mode signalled = case B.uncons =<< signalled of
     Just (byte, _) -> (byte .&. modeBytemask) `shiftR` 5
