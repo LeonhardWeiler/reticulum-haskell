@@ -9,13 +9,16 @@ module Reticulum.Announce
     , expectedHash
     , destinationMatch
     , signatureValid
+    , stamped
     , randomHashLength
     ) where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.Maybe (fromMaybe)
+import Data.Word (Word64)
 
+import qualified Reticulum.Bytes as Bytes
 import Reticulum.Destination (DestinationHash (destinationHashBytes), NameHash (NameHash))
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Identity as Identity
@@ -25,6 +28,15 @@ import Reticulum.Rejection (Rejection (ShortPayload))
 -- | Five random bytes and five of unix time, big endian.
 randomHashLength :: Int
 randomHashLength = 10
+
+stampLength :: Int
+stampLength = 5
+
+-- | Entropy first, then the unix time it was emitted at, and the table
+-- on the other side reads the second half to tell two announces apart.
+stamped :: ByteString -> Word64 -> ByteString
+stamped entropy now =
+    B.take (randomHashLength - stampLength) entropy <> Bytes.bigEndianOf stampLength now
 
 data Announce = Announce
     { publicKey :: Identity.PublicKey

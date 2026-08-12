@@ -20,12 +20,15 @@ module Reticulum.Resource
     , part
     , extend
     , whole
+    , metadata
+    , matches
     , proving
     , Giving (..)
     , Segment (..)
     , firstSegment
     , nextSegment
     , spanning
+    , compressing
     , giving
     , advertised
     , handing
@@ -39,15 +42,18 @@ module Reticulum.Resource
     , proofLength
     ) where
 
+import qualified Codec.Compression.BZip as BZip
 import Control.Monad (guard)
 import Data.Bits (testBit, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as Lazy
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Word (Word64, Word8)
 
+import qualified Reticulum.Bytes as Bytes
 import qualified Reticulum.Identity as Identity
 import qualified Reticulum.Msgpack as Msgpack
 import Reticulum.Rejection (Rejection (FixedLength, ShortPlaintext))
@@ -337,6 +343,18 @@ whole value
     | Map.size (gathered value) == pieces value = Just (B.concat (Map.elems (gathered value)))
     | otherwise = Nothing
 
+-- | Metadata is three bytes of length and then that many bytes, and only
+-- the first segment carries it.
+metadata :: Taking -> ByteString -> ByteString
+metadata value body
+    | prefixed value && index value == 1 = B.drop (3 + size) body
+    | otherwise = body
+  where
+    size = fromIntegral (Bytes.bigEndian (B.take 3 body))
+
+matches :: Taking -> ByteString -> Bool
+matches value body = Identity.fullHash (body <> entropy value) == resource value
+
 proving :: ByteString -> Taking -> ByteString
 proving assembled value =
     resource value <> Identity.fullHash (assembled <> resource value)
@@ -414,6 +432,16 @@ nextSegment value
 spanning :: Segment -> ByteString -> Int
 spanning told body =
     (fromIntegral (nth told) - 1) * maxSegmentSize + B.length body + B.length (left told)
+
+-- | What goes over the link is the data compressed when that is
+-- shorter, and past a size it is the data however well it compresses.
+compressing :: Segment -> ByteString -> (ByteString, Bool)
+compressing told body
+    | worth && B.length packed < B.length body = (packed, True)
+    | otherwise = (body, False)
+  where
+    worth = spanning told body <= autoCompressLimit
+    packed = Lazy.toStrict (BZip.compress (Lazy.fromStrict body))
 
 -- | Both hashes are over the data of this segment, and neither is over
 -- what is sent: the stream that goes out is compressed and sealed, and

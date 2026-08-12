@@ -35,7 +35,7 @@ module Reticulum.Transport
     , rebroadcast
     , overheard
     , responding
-    , window
+    , spread
     ) where
 
 import Data.ByteString (ByteString)
@@ -348,6 +348,9 @@ grace = 5
 window :: Double
 window = 0.5
 
+spread :: Word8 -> Double
+spread byte = window * fromIntegral byte / 256
+
 localRebroadcasts :: Int
 localRebroadcasts = 2
 
@@ -367,13 +370,13 @@ type Waiting i = Map DestinationHash (Pending i)
 
 -- | A path response answers one request and is not carried further.
 queued :: Time -> Double -> i -> Packet -> Maybe (Pending i)
-queued now spread through packet
+queued now wait through packet
     | Packet.context packet == Packet.PathResponse = Nothing
     | otherwise =
         Just
             Pending
                 { announce = packet
-                , sendAt = later now spread
+                , sendAt = later now wait
                 , retries = 0
                 , rebroadcasts = 0
                 , blocked = False

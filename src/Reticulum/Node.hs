@@ -31,7 +31,7 @@ import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forever, void, when)
 import qualified Crypto.Random.Entropy as Entropy
-import Data.Bits (shiftR, testBit)
+import Data.Bits (testBit)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as Lazy
@@ -40,12 +40,11 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Unique (Unique, newUnique)
-import Data.Word (Word64, Word8)
+import Data.Word (Word8)
 import System.IO (hPutStrLn, stderr)
 
 import Reticulum.Announce (Announce)
 import qualified Reticulum.Announce as Announce
-import qualified Reticulum.Bytes as Bytes
 import Reticulum.Destination (DestinationHash (DestinationHash, destinationHashBytes), Name)
 import qualified Reticulum.Destination as Destination
 import qualified Reticulum.Encryption as Encryption
@@ -499,9 +498,9 @@ assembling node session link held stream = do
     case whole of
         Nothing -> pure ()
         Just body
-            | Identity.fullHash (body <> Resource.entropy held) /= Resource.resource held -> pure ()
+            | not (Resource.matches held body) -> pure ()
             | otherwise -> do
-                complete <- collected node link held (metadata held body)
+                complete <- collected node link held (Resource.metadata held body)
                 writing
                     node
                     session
@@ -523,15 +522,6 @@ decompressed :: ByteString -> IO (Maybe ByteString)
 decompressed body = do
     outcome <- try (evaluate (Lazy.toStrict (BZip.decompress (Lazy.fromStrict body))))
     pure (either (\reason -> const Nothing (reason :: SomeException)) Just outcome)
-
--- | Metadata is three bytes of length and then that many bytes, and only
--- the first segment carries it.
-metadata :: Resource.Taking -> ByteString -> ByteString
-metadata held body
-    | Resource.prefixed held && Resource.index held == 1 = B.drop (3 + size) body
-    | otherwise = body
-  where
-    size = fromIntegral (Bytes.bigEndian (B.take 3 body))
 
 -- | A resource in segments is one resource, and only the last of them
 -- is answered with what all of them came to; the segment is put away
@@ -624,10 +614,7 @@ advertising node link asking' body told = do
                     _ <- sending node session link Packet.ResourceAdv (advertisement kept)
                     pure (Just (Resource.heading kept))
   where
-    squeezing = Resource.spanning told body <= Resource.autoCompressLimit
-    packed = Lazy.toStrict (BZip.compress (Lazy.fromStrict body))
-    shorter = squeezing && B.length packed < B.length body
-    carried = if shorter then packed else body
+    (carried, shorter) = Resource.compressing told body
     made session salt stream =
         Resource.giving (Link.partSize (unit session)) told salt body stream shorter asking'
     advertisement = Resource.packAdvertisement . Resource.advertised
@@ -1084,20 +1071,10 @@ keypair = do
 spread :: IO Double
 spread = do
     bytes <- Entropy.getEntropy 1
-    pure $ case B.unpack bytes of
-        [byte] -> Transport.window * fromIntegral byte / 256
-        _ -> 0
+    pure (maybe 0 (Transport.spread . fst) (B.uncons bytes))
 
-stampLength :: Int
-stampLength = 5
-
--- | Entropy first, then the unix time it was emitted at.
 randomHash :: IO ByteString
 randomHash = do
-    entropy <- Entropy.getEntropy (Announce.randomHashLength - stampLength)
+    entropy <- Entropy.getEntropy Announce.randomHashLength
     now <- getPOSIXTime
-    pure (entropy <> stamp (floor now))
-
-stamp :: Word64 -> ByteString
-stamp value =
-    B.pack [fromIntegral (value `shiftR` (8 * place)) | place <- [stampLength - 1, stampLength - 2 .. 0]]
+    pure (Announce.stamped entropy (floor now))
